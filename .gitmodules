@@ -1,0 +1,9 @@
+[submodule "zig-args"]
+	path = zig-args
+	url = https://github.com/MasterQ32/zig-args.git
+[submodule "src/zig-cache"]
+	path = src/zig-cache
+	url = https://github.com/MasterQ32/zig-args.git
+[submodule "src/zig-args"]
+	path = src/zig-args
+	url = https://github.com/MasterQ32/zig-args.git
