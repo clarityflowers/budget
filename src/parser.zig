@@ -7,81 +7,220 @@ const expect = testing.expect;
 const expectEqual = testing.expectEqual;
 const expectEqualSlices = testing.expectEqualSlices;
 const expectEqualStrings = testing.expectEqualStrings;
+const expectError = testing.expectError;
 
 const Allocator = mem.Allocator;
 const ArenaAllocator = heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 
 pub fn Result(comptime Output: type) type {
-    return union(enum) {
-        Ok: struct {
-            in: Input, out: Output
-        }, Err: struct {
-            in: Input, err: anyerror
+    return struct {
+        index: usize = 0,
+        out: Output,
+    };
+}
+
+pub fn pass(index: usize, output: var) Result(@TypeOf(output)) {
+    return .{
+        .index = index,
+        .out = output,
+    };
+}
+
+pub const NextFailure = enum {
+    none,
+    child,
+    children,
+};
+pub const Failure = struct {
+    err: anyerror,
+    index: usize,
+    next: union(NextFailure) {
+        none, child: *const Failure, children: []const Failure
+    },
+
+    pub fn deinitChildren(self: *const @This(), allocator: *Allocator) void {
+        switch (self.next) {
+            .none => {},
+            .child => |child| {
+                child.deinit(allocator);
+            },
+            .children => |children| {
+                for (children) |child| {
+                    child.deinitChildren(allocator);
+                }
+                allocator.free(children);
+            },
         }
-    };
-}
-
-pub fn ok(input: Input, output: var) Result(@TypeOf(output)) {
-    return .{
-        .Ok = .{
-            .in = input,
-            .out = output,
-        },
-    };
-}
-
-pub fn err(comptime Output: type, input: Input, er: anyerror) Result(Output) {
-    return .{
-        .Err = .{
-            .in = input,
-            .err = er,
-        },
-    };
-}
-
-pub const Input = struct {
-    str: []const u8,
-    index: usize = 0,
-    allocator: *Allocator,
-
-    pub inline fn consume(self: @This(), len: usize) @This() {
-        std.debug.assert(self.index + len <= self.str.len);
-        return @This(){
-            .str = self.str,
-            .index = self.index + len,
-            .allocator = self.allocator,
-        };
     }
 
-    pub inline fn get(self: @This()) []const u8 {
-        if (self.index >= self.str.len) return "";
-        return self.str[self.index..];
+    pub fn deinit(self: *const @This(), allocator: *Allocator) void {
+        self.deinitChildren(allocator);
+        allocator.destroy(self);
+    }
+
+    pub fn expectToBe(self: *const @This(), err: anyerror, index: usize) *const @This() {
+        expectEqual(err, self.err);
+        expectEqual(index, self.index);
+        return self;
+    }
+
+    pub fn expectLast(self: *const @This()) void {
+        expectEqual(NextFailure.none, self.next);
+    }
+    pub fn expectChild(self: *const @This(), err: anyerror, index: usize) *const @This() {
+        expectEqual(NextFailure.child, self.next);
+        var child = self.next.child;
+        return child.expectToBe(err, index);
+    }
+    pub fn expectChildren(self: *const @This(), amount: usize) []const Failure {
+        expectEqual(NextFailure.children, self.next);
+        expectEqual(amount, self.next.children.len);
+        return self.next.children;
+    }
+
+    pub fn print(self: *const @This(), str: []const u8, stream: var) anyerror!void {
+        var ln_number: usize = 1;
+        var ln_start: usize = 0;
+        const ln_end: usize = blk: {
+            for (str) |char, i| {
+                if (char == '\n') {
+                    if (i >= self.index) break :blk i;
+                    ln_number += 1;
+                    ln_start = i;
+                }
+            }
+            break :blk str.len;
+        };
+        try stream.print("{}\n{}:{}\n  ", .{ @errorName(self.err), ln_number, str[ln_start..ln_end] });
+        var i: usize = ln_start;
+        while (i < self.index) : (i += 1) {
+            try stream.writeByte(' ');
+        }
+        _ = try stream.write("^\n\n");
+
+        switch (self.next) {
+            .none => {},
+            .child => |child| try child.print(str, stream),
+            .children => |children| for (children) |child, child_i| {
+                try stream.print("---{} CHILD {}:---\n", .{ @errorName(self.err), child_i });
+                try child.print(str, stream);
+            },
+        }
     }
 };
 
+pub const State = struct {
+    str: []const u8,
+    allocator: *Allocator,
+    failure_list: ?*Failure = null,
+    failure_branches: ArrayList(Failure),
+
+    pub inline fn get(self: *@This(), index: usize) []const u8 {
+        if (index >= self.str.len) return "";
+        return self.str[index..];
+    }
+
+    pub fn fail(self: *@This(), index: usize, comptime err: anyerror) !void {
+        const new_failure = try self.allocator.create(Failure);
+        new_failure.err = err;
+        new_failure.index = index;
+        if (self.failure_list) |head| {
+            new_failure.next = .{ .child = head };
+        } else {
+            new_failure.next = .none;
+        }
+        self.failure_list = new_failure;
+    }
+
+    pub fn branchFailures(self: *@This()) !void {
+        if (self.failure_list) |failure| {
+            try self.failure_branches.append(failure.*);
+            self.failure_list = null;
+        }
+    }
+
+    pub fn endBranches(self: *@This(), index: usize, comptime err: anyerror) !void {
+        try self.branchFailures();
+        const new_failure = try self.allocator.create(Failure);
+        new_failure.err = err;
+        new_failure.index = index;
+        new_failure.next = .{ .children = self.failure_branches.toOwnedSlice() };
+        self.failure_list = new_failure;
+    }
+
+    pub fn expectFailure(self: *@This(), comptime parser: var, err: anyerror, index: usize) *const Failure {
+        expectError(error.NotParsed, parser(self, 0));
+        expect(self.failure_list != null);
+        return self.failure_list.?.expectToBe(err, index);
+    }
+
+    pub fn expectSuccess(self: *@This(), comptime parser: var, index: usize, expected_output: var) void {
+        const result = parser(self, 0);
+        if (result) |res| {
+            expectSame(expected_output, res.out);
+            expectEqual(index, res.index);
+        } else |err| {
+            unreachable; // expected a success!
+        }
+    }
+
+    pub fn reset(self: *@This(), str: []const u8) *State {
+        self.str = str;
+        self.deinit();
+        return self;
+    }
+    pub fn init(str: []const u8, allocator: *Allocator) @This() {
+        return @This(){
+            .str = str,
+            .allocator = allocator,
+            .failure_branches = ArrayList(Failure).init(allocator),
+        };
+    }
+
+    pub fn resetFailures(self: *@This()) void {
+        if (self.failure_list) |failure_list| {
+            failure_list.deinit(self.allocator);
+            self.failure_list = null;
+        }
+        self.failure_branches.shrink(0);
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.resetFailures();
+    }
+};
+
+pub const Error = error{ NotParsed, OutOfMemory };
+
 pub fn Parser(comptime Output: type) type {
-    return fn (input: Input) Result(Output);
+    return fn (state: *State, index: usize) Error!Result(Output);
 }
 
-pub fn matchLiteral(comptime expected: []const u8) Parser(void) {
+pub fn literal(comptime expected: []const u8) Parser(void) {
     return struct {
-        fn parse(input: Input) Result(void) {
-            const str = input.get();
+        fn parse(state: *State, index: usize) Error!Result(void) {
+            const str = state.get(index);
             if (expected.len <= str.len and mem.eql(u8, str[0..expected.len], expected)) {
-                return ok(input.consume(expected.len), {});
+                return pass(index + expected.len, {});
             } else {
-                return err(void, input, error.LiteralDidntMatch);
+                try state.fail(index, error.MatchLiteral);
+                return error.NotParsed;
             }
         }
     }.parse;
 }
 
-test "matchLiteral" {
-    comptime const parser = matchLiteral("Hello");
-    expectOk(parser, "Hello, world!", 5, {});
-    expectErr(parser, "Hell", error.LiteralDidntMatch);
-    expectErr(parser, "Goodybye", error.LiteralDidntMatch);
+test "literal" {
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    comptime const parser = literal("Hello");
+    var state = &State.init("Hello, world!", allocator);
+    state.expectSuccess(parser, 5, {});
+    state.reset("Hell").expectFailure(parser, error.MatchLiteral, 0).expectLast();
+    state.reset("Goodbye").expectFailure(parser, error.MatchLiteral, 0).expectLast();
 }
 
 inline fn isAlpha(char: u8) bool {
@@ -94,14 +233,18 @@ inline fn isAlphaNum(char: u8) bool {
     return isAlpha(char) or isNum(char);
 }
 
-pub fn identifier(input: Input) Result([]const u8) {
+pub fn identifier(state: *State, index: usize) Error!Result([]const u8) {
     var len: usize = 0;
-    const str = input.get();
-    if (str.len == 0) return err([]const u8, input, error.IdentifierMustNotBeEmpty);
+    const str = state.get(index);
+    if (str.len == 0) {
+        try state.fail(index, error.EmptyIdentifier);
+        return error.NotParsed;
+    }
     if (isAlpha(str[0])) {
         len += 1;
     } else {
-        return err([]const u8, input, error.IdentifierMustStartWithAlphaChar);
+        try state.fail(index, error.NotAnIdentifier);
+        return error.NotParsed;
     }
     for (str[1..]) |char| {
         if (isAlphaNum(char) or char == '-') {
@@ -110,15 +253,22 @@ pub fn identifier(input: Input) Result([]const u8) {
             break;
         }
     }
-    return ok(input.consume(len), str[0..len]);
+    return pass(index + len, str[0..len]);
 }
 
 test "identifier" {
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    comptime const parser = identifier;
     const ident1 = "i-am-an-identifier";
-    expectOk(identifier, ident1, ident1.len, ident1);
+    const state = &State.init(ident1, allocator);
+    state.expectSuccess(parser, ident1.len, ident1);
     const ident2 = "not entirely an identifier";
-    expectOk(identifier, ident2, 3, "not");
-    expectErr(identifier, "!not at all an identifier", error.IdentifierMustStartWithAlphaChar);
+    state.reset(ident2).expectSuccess(parser, "not".len, "not");
+    state.reset("!not at all an identifier").expectFailure(parser, error.NotAnIdentifier, 0).expectLast();
+    state.reset("").expectFailure(parser, error.EmptyIdentifier, 0).expectLast();
 }
 
 fn Pair(comptime LH: type, comptime RH: type) type {
@@ -127,62 +277,125 @@ fn Pair(comptime LH: type, comptime RH: type) type {
     };
 }
 
-pub fn pair(comptime LH: type, comptime RH: type, comptime lh: Parser(LH), comptime rh: Parser(RH)) Parser(Pair(LH, RH)) {
+fn OutputOfResult(comptime result: type) ?type {
+    const res = @typeInfo(result);
+
+    const res_fields = @typeInfo(Result(void)).Struct.fields;
+    if (res != .Struct) return null;
+    if (res.Struct.fields.len != res_fields.len) return null;
+    if (!mem.eql(u8, res.Struct.fields[0].name, res_fields[0].name)) return null;
+    if (res.Struct.fields[0].field_type != res_fields[0].field_type) return null;
+    if (!mem.eql(u8, res.Struct.fields[1].name, res_fields[1].name)) return null;
+
+    return res.Struct.fields[1].field_type;
+}
+
+fn OutputOf(parser: var) type {
+    comptime {
+        const T = @TypeOf(parser);
+        const err = "Expected value to be a Parser, but instead it was a(n) " ++ @typeName(T) ++ ".";
+        const info = @typeInfo(T);
+
+        if (info != .Fn) @compileError(err);
+        if (info.Fn.args.len != 2) @compileError(err);
+        if (info.Fn.args[0].arg_type != *State) @compileError(err);
+        if (info.Fn.args[1].arg_type != usize) @compileError(err);
+        if (info.Fn.return_type == null) @compileError(err);
+        const ret_info = @typeInfo(info.Fn.return_type.?);
+        if (ret_info != .ErrorUnion) @compileError(err);
+        if (ret_info.ErrorUnion.error_set != Error) @compileError(err);
+        return OutputOfResult(ret_info.ErrorUnion.payload) orelse @compileError(err);
+    }
+}
+
+pub fn pair(comptime lh: var, comptime rh: var) Parser(Pair(OutputOf(lh), OutputOf(rh))) {
     return struct {
-        fn parse(in: Input) Result(Pair(LH, RH)) {
-            return switch (lh(in)) {
-                .Err => |res_err| err(Pair(LH, RH), res_err.in, res_err.err),
-                .Ok => |res_lh| switch (rh(res_lh.in)) {
-                    .Err => |res_rh| err(Pair(LH, RH), res_rh.in, res_rh.err),
-                    .Ok => |res_rh| ok(res_rh.in, Pair(LH, RH){ .lh = res_lh.out, .rh = res_rh.out }),
-                },
-            };
+        fn parse(state: *State, index: usize) Error!Result(Pair(OutputOf(lh), OutputOf(rh))) {
+            if (lh(state, index)) |lh_res| {
+                if (rh(state, lh_res.index)) |rh_res| {
+                    return pass(rh_res.index, Pair(OutputOf(lh), OutputOf(rh)){ .lh = lh_res.out, .rh = rh_res.out });
+                } else |err| {
+                    try state.fail(lh_res.index, error.PairMissingRight);
+                    return err;
+                }
+            } else |err| {
+                try state.fail(index, error.PairMissingLeft);
+                return err;
+            }
         }
     }.parse;
 }
 
 test "pair" {
-    comptime const tagOpener = pair(void, []const u8, matchLiteral("<"), identifier);
-    expectOk(tagOpener, "<my-first-element/>", "<my-first-element".len, Pair(void, []const u8){ .lh = {}, .rh = "my-first-element" });
-    expectErr(tagOpener, "oops", error.LiteralDidntMatch);
-    expectErrAtIndex(tagOpener, "<!oops", error.IdentifierMustStartWithAlphaChar, "<".len);
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    comptime const parser = pair(literal("<"), identifier);
+    const state = &State.init("<my-first-element/>", allocator);
+    state.expectSuccess(parser, "<my-first-element".len, Pair(void, []const u8){ .lh = {}, .rh = "my-first-element" });
+    state.reset("oops").expectFailure(parser, error.PairMissingLeft, 0).expectChild(error.MatchLiteral, 0).expectLast();
+    state.reset("<!oops").expectFailure(parser, error.PairMissingRight, 1).expectChild(error.NotAnIdentifier, 1).expectLast();
 }
 
-pub fn map(comptime In: type, comptime Out: type, comptime in: Parser(In), comptime mapFn: fn (In) Out) Parser(Out) {
+pub fn ResultOf(comptime function: var) type {
+    comptime {
+        const info = @typeInfo(@TypeOf(function));
+        if (info != .Fn) @compileError("Expected a Fn but got a variable of type " ++ @typeName(@TypeOf(function)));
+        return info.Fn.return_type orelse void;
+    }
+}
+
+pub fn MappedParser(comptime parser: var, comptime function: var) type {
+    comptime {
+        const Out = ResultOf(function);
+        const In = OutputOf(parser);
+        const info = @typeInfo(@TypeOf(function));
+        const Expected = fn (In) Out;
+        if (@TypeOf(function) != Expected) {
+            @compileError("Expected map function to have type '" ++ @typeName(Expected) ++ "' but instead it was type '" ++ @typeName(@TypeOf(function)) ++ "'.");
+        }
+        return Parser(Out);
+    }
+}
+
+pub fn map(comptime in: var, comptime mapFn: var) MappedParser(in, mapFn) {
     return struct {
-        fn mapResult(input: Input) Result(Out) {
-            return switch (in(input)) {
-                .Err => |res| err(Out, res.in, res.err),
-                .Ok => |res| ok(res.in, mapFn(res.out)),
-            };
+        fn mapResult(state: *State, index: usize) Error!Result(ResultOf(mapFn)) {
+            const res = try in(state, index);
+            return pass(res.index, mapFn(res.out));
         }
     }.mapResult;
 }
 
-pub inline fn left(comptime LH: type, comptime RH: type, comptime lh: Parser(LH), comptime rh: Parser(RH)) Parser(LH) {
+pub inline fn left(comptime lh: var, comptime rh: var) @TypeOf(lh) {
     const takeLeft = struct {
-        inline fn take(val: Pair(LH, RH)) LH {
+        inline fn take(val: Pair(OutputOf(lh), OutputOf(rh))) OutputOf(lh) {
             return val.lh;
         }
     }.take;
-    return map(Pair(LH, RH), LH, pair(LH, RH, lh, rh), takeLeft);
+    return map(pair(lh, rh), takeLeft);
 }
 
-pub fn right(comptime LH: type, comptime RH: type, comptime lh: Parser(LH), comptime rh: Parser(RH)) Parser(RH) {
+pub fn right(comptime lh: var, comptime rh: var) @TypeOf(rh) {
     const takeRight = struct {
-        inline fn take(val: Pair(LH, RH)) RH {
+        inline fn take(val: Pair(OutputOf(lh), OutputOf(rh))) OutputOf(rh) {
             return val.rh;
         }
     }.take;
-    return map(Pair(LH, RH), RH, pair(LH, RH, lh, rh), takeRight);
+    return map(pair(lh, rh), takeRight);
 }
 
 test "right" {
-    comptime const bracket = matchLiteral("<");
-    comptime const tagOpener = right(void, []const u8, bracket, identifier);
-    expectOk(tagOpener, "<my-first-element/>", "<my-first-element".len, "my-first-element");
-    expectErr(tagOpener, "oops", error.LiteralDidntMatch);
-    expectErrAtIndex(tagOpener, "<!oops", error.IdentifierMustStartWithAlphaChar, "<".len);
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    comptime const parser = right(literal("<"), identifier);
+    const state = &State.init("<my-first-element/>", allocator);
+    state.expectSuccess(parser, "<my-first-element".len, "my-first-element");
+    state.reset("oops").expectFailure(parser, error.PairMissingLeft, 0).expectChild(error.MatchLiteral, 0).expectLast();
+    state.reset("<!oops").expectFailure(parser, error.PairMissingRight, 1).expectChild(error.NotAnIdentifier, 1).expectLast();
 }
 
 pub fn SliceOrCount(comptime T: type, is_count: bool) type {
@@ -190,126 +403,170 @@ pub fn SliceOrCount(comptime T: type, is_count: bool) type {
 }
 
 /// Caller owns the resulting slice
-pub fn nOrMore(comptime R: type, comptime parser: Parser(R), comptime n: usize, comptime is_count: bool) Parser(SliceOrCount(R, is_count)) {
+pub fn nOrMore(comptime parser: var, comptime n: usize, comptime is_count: bool) Parser(SliceOrCount(OutputOf(parser), is_count)) {
     return struct {
+        const R = OutputOf(parser);
         const NOrMoreResult = SliceOrCount(R, is_count);
-        fn parse(in: Input) Result(NOrMoreResult) {
-            const result = if (!is_count) &ArrayList(R).init(in.allocator) else undefined;
+        fn parse(state: *State, index: usize) Error!Result(NOrMoreResult) {
+            const result = if (!is_count) &ArrayList(R).init(state.allocator) else undefined;
+            errdefer if (!is_count) result.deinit();
             var count: usize = 0;
-            var in_res = in;
+            var in = index;
             while (true) : (count += 1) {
-                switch (parser(in_res)) {
-                    .Ok => |res| {
-                        in_res = res.in;
-                        if (!is_count) {
-                            result.append(res.out) catch |append_err| return err(NOrMoreResult, in_res, append_err);
-                        }
-                    },
-                    .Err => break,
+                const res = parser(state, in) catch break;
+                in = res.index;
+                if (!is_count) {
+                    try result.append(res.out);
                 }
             }
-            if (count < n) return err(NOrMoreResult, in_res, error.NotEnoughCopies);
+            if (count < n) {
+                try state.fail(in, error.NotEnoughCopies);
+                return error.NotParsed;
+            }
+            state.resetFailures();
             if (is_count) {
-                return ok(in_res, count);
+                return pass(in, count);
             } else {
-                return ok(in_res, @as([]const R, result.items));
+                return pass(in, @as([]const R, result.items));
             }
         }
     }.parse;
 }
 
-test "nOrMore" {
-    comptime const space = matchLiteral(" ");
-    comptime const oneOrMoreSpaces = nOrMore(void, space, 1, true);
-    expectOk(oneOrMoreSpaces, "   test", 3, @as(usize, 3));
-    expectErr(oneOrMoreSpaces, "", error.NotEnoughCopies);
+pub fn anyNumberOf(comptime parser: var) Parser([]const OutputOf(parser)) {
+    return nOrMore(parser, 0, false);
+}
+pub fn countAnyNumberOf(comptime parser: var) Parser(usize) {
+    return nOrMore(parser, 0, true);
+}
+pub fn some(comptime parser: var) Parser([]const OutputOf(parser)) {
+    return nOrMore(parser, 1, false);
+}
+pub fn countSome(comptime parser: var) Parser(usize) {
+    return nOrMore(parser, 1, true);
+}
 
-    comptime const zeroOrMoreIdentifiers = nOrMore([]const u8, left([]const u8, usize, identifier, nOrMore(void, space, 1, true)), 0, false);
-    expectOk(zeroOrMoreIdentifiers, "one two 3three", "one two ".len, [_][]const u8{ "one", "two" });
-    expectOk(zeroOrMoreIdentifiers, " one two", 0, [_][]const u8{});
-    expectOk(zeroOrMoreIdentifiers, "one ", "one ".len, [_][]const u8{"one"});
+test "nOrMore" {
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    comptime const space = literal(" ");
+    comptime const parser = countSome(space);
+    const state = &State.init("   test", allocator);
+    state.expectSuccess(parser, 3, @as(usize, 3));
+    state.reset("").expectFailure(parser, error.NotEnoughCopies, 0).expectChild(error.MatchLiteral, 0).expectLast();
+
+    comptime const parser2 = anyNumberOf(left(identifier, parser));
+    state.reset("one  two 3three").expectSuccess(parser2, "one  two ".len, &[_][]const u8{ "one", "two" });
+    state.reset(" one two").expectSuccess(parser2, 0, [_][]const u8{});
 }
 
 /// caller owns returned slice
-pub fn join(comptime Item: type, comptime Joint: type, comptime item: Parser(Item), comptime joint: Parser(Joint)) Parser([]const Item) {
+pub fn join(comptime item: var, comptime joint: var) Parser([]const OutputOf(item)) {
+    comptime const listParser = some(right(joint, item));
     return struct {
-        fn parse(input: Input) Result([]const Item) {
-            const first_res = switch (item(input)) {
-                .Err => |err_res| return err([]const Item, err_res.in, err_res.err),
-                .Ok => |res| res,
+        fn parse(state: *State, index: usize) Error!Result([]const OutputOf(item)) {
+            const first_res = item(state, index) catch |err| {
+                try state.fail(index, error.JoinMissingFirstItem);
+                return err;
             };
-            comptime const listParser = nOrMore(Item, right(Joint, Item, joint, item), 0, false);
-            const list_res = switch (listParser(first_res.in)) {
-                .Err => |err_res| return err([]const Item, err_res.in, err_res.err),
-                .Ok => |res| res,
-            };
-            const result = &ArrayList(Item).init(input.allocator);
-            result.append(first_res.out) catch |er| {
-                result.deinit();
-                return err([]const Item, list_res.in, er);
-            };
-            result.appendSlice(list_res.out) catch |er| {
-                result.deinit();
-                return err([]const Item, list_res.in, er);
-            };
-            return ok(list_res.in, @as([]const Item, result.items));
+            const list_res = try listParser(state, first_res.index);
+
+            const result = &ArrayList(OutputOf(item)).init(state.allocator);
+            errdefer result.deinit();
+            try result.append(first_res.out);
+            try result.appendSlice(list_res.out);
+            return pass(list_res.index, @as([]const OutputOf(item), result.items));
         }
     }.parse;
 }
 
 test "join" {
-    comptime const csv = join([]const u8, void, identifier, matchLiteral(","));
-    expectOk(csv, "one,two,three,", "one,two,three".len, [_][]const u8{ "one", "two", "three" });
-    expectErr(csv, ",one,two,three", error.IdentifierMustStartWithAlphaChar);
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    comptime const csv = join(identifier, literal(","));
+
+    const state = &State.init("one,two,three,", allocator);
+    state.expectSuccess(csv, "one,two,three".len, [_][]const u8{ "one", "two", "three" });
+    state.reset(",one,two,three").expectFailure(csv, error.JoinMissingFirstItem, 0).expectChild(error.NotAnIdentifier, 0).expectLast();
 }
 
-pub inline fn anyChar(input: Input) Result(u8) {
-    const str = input.get();
-    return if (str.len > 0) ok(input.consume(1), str[0]) else err(u8, input, error.NoMoreChars);
+pub inline fn anyChar(state: *State, index: usize) Error!Result(u8) {
+    const str = state.get(index);
+    if (str.len > 0) {
+        return pass(index + 1, str[0]);
+    } else {
+        try state.fail(index, error.NoMoreChars);
+        return error.NotParsed;
+    }
 }
 
-pub fn pred(comptime R: type, comptime parser: Parser(R), comptime predicate: fn (R) bool) Parser(R) {
+pub fn pred(comptime parser: var, comptime predicate: fn (val: OutputOf(parser)) bool) @TypeOf(parser) {
     return struct {
-        fn parse(input: Input) Result(R) {
-            switch (parser(input)) {
-                .Ok => |res| if (predicate(res.out)) return ok(res.in, res.out),
-                else => {},
+        fn parse(state: *State, index: usize) Error!Result(OutputOf(parser)) {
+            const res = try parser(state, index);
+            if (predicate(res.out)) {
+                return pass(res.index, res.out);
+            } else {
+                try state.fail(res.index, error.DidntMatchPredicate);
+                return error.NotParsed;
             }
-            return err(R, input, error.DidntMatchPredicate);
         }
     }.parse;
 }
 
 test "pred and anyChar" {
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
     comptime const isBang = struct {
         fn check(char: u8) bool {
             return char == '!';
         }
     }.check;
-    comptime const parser = pred(u8, anyChar, isBang);
-    expectErr(parser, "bang!", error.DidntMatchPredicate);
-    expectOk(parser, "!bang!", "!".len, @as(u8, '!'));
+    comptime const parser = pred(anyChar, isBang);
+
+    const state = &State.init("bang!", allocator);
+    state.expectFailure(parser, error.DidntMatchPredicate, 1).expectLast();
+    state.reset("!bang!").expectSuccess(parser, 1, @as(u8, '!'));
+}
+
+pub fn skip(comptime parser: u8) Parser(void) {
+    return struct {
+        fn parse(state: *State, index: usize) Error!Result(void) {
+            res = try parser(state, index);
+            return pass(res.index, {});
+        }
+    }.parse;
 }
 
 fn isWhitespace(char: u8) bool {
     return char == ' ' or char == '\t' or char == '\n' or char == '\r';
 }
 
-pub const whitespaceChar = pred(u8, anyChar, isWhitespace);
-
-pub fn nOrMoreSpaces(comptime n: usize) Parser(usize) {
-    return nOrMore(u8, whitespaceChar, n, true);
-}
+pub const whitespaceChar = pred(anyChar, isWhitespace);
+pub const someSpaces = countSome(whitespaceChar);
+pub const anyNumberOfSpaces = countAnyNumberOf(whitespaceChar);
 
 inline fn isNotQuote(char: u8) bool {
     return char != '"';
 }
 
-pub const quotedString = right(void, []const u8, matchLiteral("\""), left([]const u8, void, nOrMore(u8, pred(u8, anyChar, isNotQuote), 0, false), matchLiteral("\"")));
+pub const quotedString = right(literal("\""), left(anyNumberOf(pred(anyChar, isNotQuote)), literal("\"")));
 
 test "quotedString" {
-    expectOk(quotedString, "\"hello, world,\" she said", "\"hello, world,\"".len, "hello, world,");
-    expectErrAtIndex(quotedString, "\"hello, world,", error.LiteralDidntMatch, "\"hello, world,".len);
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    const state = &State.init("\"hello, world,\" she said", allocator);
+    state.expectSuccess(quotedString, "\"hello, world,\"".len, "hello, world,");
+    state.reset("\"hello, world,").expectFailure(quotedString, error.PairMissingRight, "\"".len).expectChild(error.PairMissingRight, "\"hello, world,".len).expectChild(error.MatchLiteral, "\"hello, world,".len).expectLast();
+    state.reset("hello world").expectFailure(quotedString, error.PairMissingLeft, 0).expectChild(error.MatchLiteral, 0).expectLast();
 }
 
 pub const AttributePair = Pair([]const u8, []const u8);
@@ -322,12 +579,17 @@ fn toAttribute(attribute_pair: AttributePair) Attribute {
         .value = attribute_pair.rh,
     };
 }
-pub const attributePair = map(AttributePair, Attribute, pair([]const u8, []const u8, identifier, right(void, []const u8, matchLiteral("="), quotedString)), toAttribute);
+pub const attributePair = map(pair(identifier, right(literal("="), quotedString)), toAttribute);
 
-pub const attributes = nOrMore(Attribute, right(usize, Attribute, nOrMoreSpaces(1), attributePair), 0, false);
+pub const attributes = anyNumberOf(right(someSpaces, attributePair));
 
 test "attributes" {
-    expectOk(attributes, " one=\"1\" two=\"2\"", " one=\"1\" two=\"2\"".len, [_]Attribute{ .{
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    const state = &State.init(" one=\"1\" two=\"2\"", allocator);
+    state.expectSuccess(attributes, " one=\"1\" two=\"2\"".len, [_]Attribute{ .{
         .key = "one",
         .value = "1",
     }, .{
@@ -337,7 +599,7 @@ test "attributes" {
 }
 
 pub const ElementStart = Pair([]const u8, []const Attribute);
-pub const elementStart = right(void, ElementStart, matchLiteral("<"), pair([]const u8, []const Attribute, identifier, attributes));
+pub const elementStart = right(literal("<"), pair(identifier, attributes));
 
 pub const Element = struct {
     name: []const u8, attributes: []const Attribute = &[_]Attribute{}, children: []const Element = &[_]Element{}
@@ -349,11 +611,16 @@ fn intoElement(start: ElementStart) Element {
         .attributes = start.rh,
     };
 }
-pub const singleElement = map(ElementStart, Element, left(ElementStart, void, elementStart, matchLiteral("/>")), intoElement);
+pub const singleElement = map(left(elementStart, right(anyNumberOfSpaces, literal("/>"))), intoElement);
 
 test "single element" {
-    const expected = "<div class=\"zone\"/>";
-    expectOk(singleElement, expected, expected.len, Element{
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    const str = "<div class=\"zone\" />";
+    const state = &State.init(str, allocator);
+    state.expectSuccess(singleElement, str.len, Element{
         .name = "div",
         .attributes = &[_]Attribute{.{
             .key = "class",
@@ -361,78 +628,136 @@ test "single element" {
         }},
     });
 }
+pub const openElement = map(left(elementStart, right(anyNumberOfSpaces, literal(">"))), intoElement);
 
-pub const openElement = map(ElementStart, Element, left(ElementStart, void, elementStart, matchLiteral(">")), intoElement);
-
-pub fn either(comptime R: type, comptime first: Parser(R), comptime second: Parser(R)) Parser(R) {
+pub fn either(comptime first: var, comptime second: var) @TypeOf(first) {
+    if (@TypeOf(first) != @TypeOf(second)) {
+        @compileError("either() requires both parsers to have the same output type, but your types were " ++ @typeName(ResultOf(first)) ++ " and " ++ @typeName(ResultOf(second)) ++ ".");
+    }
     return struct {
-        fn parse(input: Input) Result(R) {
-            return switch (first(input)) {
-                .Ok => |res| ok(res.in, res.out),
-                .Err => switch (second(input)) {
-                    .Ok => |res| ok(res.in, res.out),
-                    .Err => |res| err(R, res.in, res.err),
-                },
-            };
+        fn parse(state: *State, index: usize) Error!Result(OutputOf(first)) {
+            if (first(state, index)) |res| {
+                return res;
+            } else |err_lh| {
+                switch (err_lh) {
+                    error.OutOfMemory => return err_lh,
+                    error.NotParsed => {
+                        try state.branchFailures();
+                        if (second(state, index)) |res| {
+                            state.resetFailures();
+                            return res;
+                        } else |err_rh| {
+                            switch (err_rh) {
+                                error.OutOfMemory => {
+                                    state.resetFailures();
+                                    return err_rh;
+                                },
+                                error.NotParsed => {
+                                    try state.endBranches(index, error.NeitherMatch);
+                                    return error.NotParsed;
+                                },
+                            }
+                        }
+                    },
+                }
+            }
         }
     }.parse;
 }
 
-pub const element = wrappedInWhitespace(Element, either(Element, singleElement, parentElement));
-pub const children = nOrMore(Element, element, 0, false);
-pub const closeElementStart = matchLiteral("</");
-pub const closeElementEnd = right(usize, void, nOrMoreSpaces(0), matchLiteral(">"));
+pub const element = wrappedInWhitespace(either(singleElement, parentElement));
+pub const childElements = anyNumberOf(element);
+pub const closeElementStart = literal("</");
+pub const closeElementEnd = right(anyNumberOfSpaces, literal(">"));
 
-pub fn parentElement(input: Input) Result(Element) {
-    const open_res = switch (openElement(input)) {
-        .Ok => |res| res,
-        .Err => |res| return err(Element, res.in, res.err),
+fn ResultOfThenFn(comptime parser: var, comptime thenFn: var) type {
+    comptime const err = "Expect thenFn to be 'fn(ResultOf(parser), *State, usize) Error!Result(T)' but it was '" ++ @typeName(@TypeOf(thenFn)) ++ "' instead.";
+    const info = @typeInfo(@TypeOf(thenFn));
+    if (info != .Fn) @compileError(err);
+    if (info.return_type) |ret_type| {
+        const ret_info = @typeInfo(ret_type);
+        if (ret_info != .ErrorUnion) @compileError(err);
+        return OutputOfResult(ret_info.ErrorUnion.payload) orelse @compileError(err);
+    } else @compileError(err);
+}
+
+pub fn then(comptime parser: var, comptime thenFn: var) Parser(ResultOfThenFn(parser, thenFn)) {
+    return struct {
+        fn parse(state: *State, index: usize) Error!Result(ResultOfThenFn(parser, thenFn)) {
+            const res = try parse(state, index);
+            return try thenFn(res.out, state, res.index);
+        }
+    }.parse;
+}
+
+pub fn parentElement(state: *State, index: usize) Error!Result(Element) {
+    const open_res = openElement(state, index) catch |err| {
+        try state.fail(index, error.ElementMissingOpening);
+        return err;
     };
-    const children_res = switch (children(open_res.in)) {
-        .Ok => |res| res,
-        .Err => |res| return err(Element, res.in, res.err),
+    const children_res = try childElements(state, open_res.index);
+    const close_start_res = closeElementStart(state, children_res.index) catch |err| {
+        try state.fail(children_res.index, error.ElementCloseStart);
+        return err;
     };
-    const close_start_res = switch (closeElementStart(children_res.in)) {
-        .Ok => |res| res,
-        .Err => |res| return err(Element, res.in, res.err),
-    };
-    const str = close_start_res.in.get();
+    const str = state.get(close_start_res.index);
 
     var final_res = open_res.out;
     const expected = final_res.name;
     if (expected.len > str.len or !mem.eql(u8, str[0..expected.len], expected)) {
-        return err(Element, close_start_res.in, error.ElementWasNotClosed);
+        try state.fail(close_start_res.index, error.WrongClosingTag);
+        return error.NotParsed;
     }
 
-    const close_end_res = switch (closeElementEnd(close_start_res.in.consume(expected.len))) {
-        .Ok => |res| res,
-        .Err => |res| return err(Element, res.in, res.err),
+    const close_end_res = closeElementEnd(state, close_start_res.index + expected.len) catch |err| {
+        try state.fail(children_res.index, error.ElementCloseEnd);
+        return err;
     };
 
     final_res.children = children_res.out;
 
-    return ok(close_end_res.in, final_res);
+    return pass(close_end_res.index, final_res);
 }
 
-pub fn wrappedInWhitespace(comptime R: type, comptime parser: Parser(R)) Parser(R) {
-    return right(usize, R, nOrMoreSpaces(0), left(R, usize, parser, nOrMoreSpaces(0)));
+pub fn wrappedInWhitespace(comptime parser: var) @TypeOf(parser) {
+    return right(anyNumberOfSpaces, left(parser, anyNumberOfSpaces));
 }
 
 test "parseHtml" {
+    var arena = ArenaAllocator.init(heap.page_allocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator;
+
+    const simplest_str = "<test />";
+    const state = &State.init(simplest_str, allocator);
+    state.expectSuccess(element, simplest_str.len, Element{ .name = "test" });
+
+    const simple_str =
+        \\<p class="part-1" ><test /></p>
+    ;
+    _ = element(state.reset(simple_str), 0) catch {
+        const stream = &std.io.getStdOut().outStream();
+        try state.failure_list.?.print(simple_str, stream);
+    };
+    state.reset(simple_str).expectSuccess(element, simple_str.len, Element{
+        .name = "p",
+        .attributes = &[_]Attribute{.{ .key = "class", .value = "part-1" }},
+        .children = &[_]Element{.{ .name = "test" }},
+    });
+
     const str =
         \\<article>
         \\  <p class="part-1" ><test /></p>
         \\  <br />
         \\</article>
     ;
-    expectErrAtIndex(element, str, error.Whatever, 9);
-    expectOk(element, str, str.len, Element{
-        .name = "Article",
-        .children = &[_]Element{.{
+    state.reset(str).expectSuccess(element, str.len, Element{
+        .name = "article",
+        .children = &[_]Element{ .{
             .name = "p",
             .attributes = &[_]Attribute{.{ .key = "class", .value = "part-1" }},
             .children = &[_]Element{.{ .name = "test" }},
-        }},
+        }, .{ .name = "br" } },
     });
 }
 
@@ -452,7 +777,7 @@ fn toSlice(comptime T: type, value: var) []const T {
             return value[0..];
         },
         else => {
-            @compileError("can only convert arrays and slices to slices");
+            @compileError("can only convert arrays and slices to slices, but this is type \"" ++ @typeName(@TypeOf(value)) ++ "\"");
         },
     }
 }
@@ -514,27 +839,51 @@ fn expectSame(expected: var, actual: var) void {
     }
 }
 
+pub fn ErrorFromParser(comptime parser: var) type {
+    const ParserType = @TypeOf(parser);
+    const info = @typeInfo(ParserType);
+    return @typeInfo(info.Fn.return_type.?).ErrorUnion.error_set;
+}
+
 fn expectOk(comptime parser: var, str: []const u8, consumed: usize, output: var) void {
     var arena = ArenaAllocator.init(heap.page_allocator);
     defer arena.deinit();
     const allocator = &arena.allocator;
-    const in = Input{ .str = str, .allocator = allocator };
-    const res = parser(in);
-    expect(res == .Ok);
-    expectEqual(in.consume(consumed), res.Ok.in);
-    expectSame(output, res.Ok.out);
+    var state = State{ .str = str, .allocator = allocator };
+    const res = parser(&state, 0);
+    if (res) |success| {
+        expectEqual(consumed, success.index);
+        expectSame(output, success.out);
+    } else |err| {
+        std.debug.warn("Expected parser to pass, but got {}", .{err});
+        expect(false);
+    }
 }
 
-fn expectErrAtIndex(parser: var, str: []const u8, expected_error: anyerror, index: usize) void {
+fn expectErr(comptime parser: var, str: []const u8, comptime expected: var) void {
     var arena = ArenaAllocator.init(heap.page_allocator);
     defer arena.deinit();
     const allocator = &arena.allocator;
-    const in = Input{ .str = str, .allocator = allocator };
-    const res = parser(in);
-    expect(res == .Err);
-    expectEqual(in.consume(index), res.Err.in);
-    expectEqual(expected_error, res.Err.err);
-}
-fn expectErr(parser: var, str: []const u8, expected_error: anyerror) void {
+    var state = State{
+        .str = str,
+        .allocator = allocator,
+    };
+    const res = parser(&state, 0);
+    if (res) |success| {
+        std.debug.warn("Expected parser to fail, but got {}", .{success});
+        expect(false); // Should have been an err!
+    } else |err| {
+        if (state.failure_list) |failure_head| {
+            var failure = failure_head;
+            const fields = @typeInfo(@TypeOf(expected)).Struct.fields;
+            var i: usize = 0;
+            var current_err = state.failure_list;
+            while (i < fields.len) {
+                const index = @field(expected, 0);
+            }
+        } else {
+            std.debug.warn("Failure list was empty!", .{});
+        }
+    }
     expectErrAtIndex(parser, str, expected_error, 0);
 }
