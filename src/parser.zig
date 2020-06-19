@@ -1,7 +1,8 @@
-const std = @import("std");
+costd = @import("std");
 const testing = std.testing;
 const mem = std.mem;
 const heap = std.heap;
+const io = std.io;
 
 const expect = testing.expect;
 const expectEqual = testing.expectEqual;
@@ -12,6 +13,7 @@ const expectError = testing.expectError;
 const Allocator = mem.Allocator;
 const ArenaAllocator = heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
+const SegmentedList = std.SegmentedList;
 
 pub fn Result(comptime Output: type) type {
     return struct {
@@ -114,7 +116,7 @@ pub const State = struct {
     str: []const u8,
     allocator: *Allocator,
     failure_list: ?*Failure = null,
-    failure_branches: ArrayList(Failure),
+    failure_branches: SegmentedList(ArrayList(Failure), 4),
 
     pub inline fn get(self: *@This(), index: usize) []const u8 {
         if (index >= self.str.len) return "";
@@ -135,17 +137,41 @@ pub const State = struct {
 
     pub fn branchFailures(self: *@This()) !void {
         if (self.failure_list) |failure| {
-            try self.failure_branches.append(failure.*);
+            var new_branch = ArrayList(Failure).init(self.allocator);
+            try new_branch.append(failure.*);
+            try self.failure_branches.push(new_branch);
+            self.allocator.destroy(failure);
             self.failure_list = null;
         }
     }
 
+    pub fn addBranch(self: *@This()) !void {
+        if (self.failure_list) |failure| {
+            defer self.allocator.destroy(failure);
+            if (self.failure_branches.pop()) |*branch| {
+                errdefer branch.deinit();
+                try branch.append(failure.*);
+                try self.failure_branches.push(branch.*);
+            }
+        }
+    }
+
+    pub fn abandonBranch(self: *@This()) void {
+        if (self.failure_branches.pop()) |*branch| {
+            branch.deinit();
+        }
+    }
+
     pub fn endBranches(self: *@This(), index: usize, comptime err: anyerror) !void {
-        try self.branchFailures();
+        try self.addBranch();
         const new_failure = try self.allocator.create(Failure);
+        errdefer self.allocator.destroy(new_failure);
         new_failure.err = err;
         new_failure.index = index;
-        new_failure.next = .{ .children = self.failure_branches.toOwnedSlice() };
+        if (self.failure_branches.pop()) |*branch| {
+            errdefer branch.deinit();
+            new_failure.next = .{ .children = branch.toOwnedSlice() };
+        }
         self.failure_list = new_failure;
     }
 
@@ -161,7 +187,8 @@ pub const State = struct {
             expectSame(expected_output, res.out);
             expectEqual(index, res.index);
         } else |err| {
-            unreachable; // expected a success!
+            if (self.failure_list) |list| list.print(self.str, io.getStdErr().outStream()) catch unreachable;
+            unreachable;
         }
     }
 
@@ -174,7 +201,7 @@ pub const State = struct {
         return @This(){
             .str = str,
             .allocator = allocator,
-            .failure_branches = ArrayList(Failure).init(allocator),
+            .failure_branches = SegmentedList(ArrayList(Failure), 4).init(allocator),
         };
     }
 
@@ -183,11 +210,14 @@ pub const State = struct {
             failure_list.deinit(self.allocator);
             self.failure_list = null;
         }
+    }
+    pub fn clearBranches(self: *@This()) void {
         self.failure_branches.shrink(0);
     }
 
     pub fn deinit(self: *@This()) void {
         self.resetFailures();
+        self.clearBranches();
     }
 };
 
@@ -645,6 +675,7 @@ pub fn either(comptime first: var, comptime second: var) @TypeOf(first) {
                         try state.branchFailures();
                         if (second(state, index)) |res| {
                             state.resetFailures();
+                            state.abandonBranch();
                             return res;
                         } else |err_rh| {
                             switch (err_rh) {
@@ -665,8 +696,15 @@ pub fn either(comptime first: var, comptime second: var) @TypeOf(first) {
     }.parse;
 }
 
-pub const element = wrappedInWhitespace(either(singleElement, parentElement));
-pub const childElements = anyNumberOf(element);
+const el = return wrappedInWhitespace(either(singleElement, parentElement));
+pub fn element(state: *State, index: usize) Error!Result(Element) {
+    const res = el(state, index) catch |err| {
+        try state.fail(index, error.Element);
+        return err;
+    };
+    return pass(res.index, res.out);
+}
+pub const childElements: Parser([]const Element) = anyNumberOf(element);
 pub const closeElementStart = literal("</");
 pub const closeElementEnd = right(anyNumberOfSpaces, literal(">"));
 
@@ -674,50 +712,40 @@ fn ResultOfThenFn(comptime parser: var, comptime thenFn: var) type {
     comptime const err = "Expect thenFn to be 'fn(ResultOf(parser), *State, usize) Error!Result(T)' but it was '" ++ @typeName(@TypeOf(thenFn)) ++ "' instead.";
     const info = @typeInfo(@TypeOf(thenFn));
     if (info != .Fn) @compileError(err);
-    if (info.return_type) |ret_type| {
+    if (info.Fn.return_type) |ret_type| {
         const ret_info = @typeInfo(ret_type);
         if (ret_info != .ErrorUnion) @compileError(err);
-        return OutputOfResult(ret_info.ErrorUnion.payload) orelse @compileError(err);
+        const T = OutputOfResult(ret_info.ErrorUnion.payload) orelse @compileError(err);
+        const Expected = fn (OutputOf(parser), *State, usize) Error!Result(T);
+        if (@TypeOf(thenFn) != Expected) @compileError("Expect thenFn to be '" ++ @typeName(Expected) ++ "' but it was '" ++ @typeName(@TypeOf(thenFn)) ++ "' instead.");
+        return T;
     } else @compileError(err);
 }
 
 pub fn then(comptime parser: var, comptime thenFn: var) Parser(ResultOfThenFn(parser, thenFn)) {
     return struct {
         fn parse(state: *State, index: usize) Error!Result(ResultOfThenFn(parser, thenFn)) {
-            const res = try parse(state, index);
+            const res = try parser(state, index);
             return try thenFn(res.out, state, res.index);
         }
     }.parse;
 }
 
-pub fn parentElement(state: *State, index: usize) Error!Result(Element) {
-    const open_res = openElement(state, index) catch |err| {
-        try state.fail(index, error.ElementMissingOpening);
-        return err;
-    };
-    const children_res = try childElements(state, open_res.index);
-    const close_start_res = closeElementStart(state, children_res.index) catch |err| {
-        try state.fail(children_res.index, error.ElementCloseStart);
-        return err;
-    };
-    const str = state.get(close_start_res.index);
+const parentStart = left(pair(openElement, childElements), closeElementStart);
+fn matchClosingTag(out: OutputOf(parentStart), state: *State, index: usize) Error!Result(Element) {
+    errdefer state.allocator.free(out.rh);
 
-    var final_res = open_res.out;
-    const expected = final_res.name;
-    if (expected.len > str.len or !mem.eql(u8, str[0..expected.len], expected)) {
-        try state.fail(close_start_res.index, error.WrongClosingTag);
+    const str = state.get(index);
+    const expected = out.lh.name;
+    if (str.len < expected.len or !mem.eql(u8, str[0..expected.len], expected)) {
+        try state.fail(index, error.ClosingTag);
         return error.NotParsed;
     }
-
-    const close_end_res = closeElementEnd(state, close_start_res.index + expected.len) catch |err| {
-        try state.fail(children_res.index, error.ElementCloseEnd);
-        return err;
-    };
-
-    final_res.children = children_res.out;
-
-    return pass(close_end_res.index, final_res);
+    var final_res = out.lh;
+    final_res.children = out.rh;
+    return pass(index + expected.len, final_res);
 }
+pub const parentElement = left(then(parentStart, matchClosingTag), right(anyNumberOfSpaces, literal(">")));
 
 pub fn wrappedInWhitespace(comptime parser: var) @TypeOf(parser) {
     return right(anyNumberOfSpaces, left(parser, anyNumberOfSpaces));
@@ -730,16 +758,13 @@ test "parseHtml" {
 
     const simplest_str = "<test />";
     const state = &State.init(simplest_str, allocator);
-    state.expectSuccess(element, simplest_str.len, Element{ .name = "test" });
+    comptime const parser = element;
+    state.expectSuccess(parser, simplest_str.len, Element{ .name = "test" });
 
     const simple_str =
         \\<p class="part-1" ><test /></p>
     ;
-    _ = element(state.reset(simple_str), 0) catch {
-        const stream = &std.io.getStdOut().outStream();
-        try state.failure_list.?.print(simple_str, stream);
-    };
-    state.reset(simple_str).expectSuccess(element, simple_str.len, Element{
+    state.reset(simple_str).expectSuccess(parser, simple_str.len, Element{
         .name = "p",
         .attributes = &[_]Attribute{.{ .key = "class", .value = "part-1" }},
         .children = &[_]Element{.{ .name = "test" }},
@@ -751,7 +776,7 @@ test "parseHtml" {
         \\  <br />
         \\</article>
     ;
-    state.reset(str).expectSuccess(element, str.len, Element{
+    state.reset(str).expectSuccess(parser, str.len, Element{
         .name = "article",
         .children = &[_]Element{ .{
             .name = "p",
@@ -837,53 +862,4 @@ fn expectSame(expected: var, actual: var) void {
         },
         else => expectEqual(expected, actual),
     }
-}
-
-pub fn ErrorFromParser(comptime parser: var) type {
-    const ParserType = @TypeOf(parser);
-    const info = @typeInfo(ParserType);
-    return @typeInfo(info.Fn.return_type.?).ErrorUnion.error_set;
-}
-
-fn expectOk(comptime parser: var, str: []const u8, consumed: usize, output: var) void {
-    var arena = ArenaAllocator.init(heap.page_allocator);
-    defer arena.deinit();
-    const allocator = &arena.allocator;
-    var state = State{ .str = str, .allocator = allocator };
-    const res = parser(&state, 0);
-    if (res) |success| {
-        expectEqual(consumed, success.index);
-        expectSame(output, success.out);
-    } else |err| {
-        std.debug.warn("Expected parser to pass, but got {}", .{err});
-        expect(false);
-    }
-}
-
-fn expectErr(comptime parser: var, str: []const u8, comptime expected: var) void {
-    var arena = ArenaAllocator.init(heap.page_allocator);
-    defer arena.deinit();
-    const allocator = &arena.allocator;
-    var state = State{
-        .str = str,
-        .allocator = allocator,
-    };
-    const res = parser(&state, 0);
-    if (res) |success| {
-        std.debug.warn("Expected parser to fail, but got {}", .{success});
-        expect(false); // Should have been an err!
-    } else |err| {
-        if (state.failure_list) |failure_head| {
-            var failure = failure_head;
-            const fields = @typeInfo(@TypeOf(expected)).Struct.fields;
-            var i: usize = 0;
-            var current_err = state.failure_list;
-            while (i < fields.len) {
-                const index = @field(expected, 0);
-            }
-        } else {
-            std.debug.warn("Failure list was empty!", .{});
-        }
-    }
-    expectErrAtIndex(parser, str, expected_error, 0);
 }
