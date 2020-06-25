@@ -11,7 +11,7 @@ const ArenaAllocator = heap.ArenaAllocator;
 
 comptime {
     if (std.builtin.is_test) {
-        _ = @import("parser.zig");
+        _ = @import("html_parser.zig");
     }
 }
 
