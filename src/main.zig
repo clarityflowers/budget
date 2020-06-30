@@ -10,13 +10,7 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = heap.ArenaAllocator;
 
 comptime {
-    if (std.builtin.is_test) {
-        _ = @import("html_parser.zig");
-    }
-}
-
-pub fn main() !void {
-    @import("parser.zig").testQuotedString();
+    _ = @import("args.zig");
 }
 
 pub fn main2() !void {
