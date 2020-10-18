@@ -82,6 +82,11 @@ const Transaction = struct {
     }
 };
 
+const TentativeTransaction = struct {
+    imported: ImportedTransaction,
+    category: ?[]const u8,
+};
+
 const ImportedTransaction = struct {
     date: Date, amount: i32, payee: []const u8, memo: []const u8, id: []const u8
 };
@@ -89,6 +94,14 @@ const ImportedTransaction = struct {
 const BudgetLine = struct {
     date: Date, amounts_by_category: StringHashMap(i32)
 };
+
+fn sortTransaction(context: void, lh: *Transaction, rh: *Transaction) bool {
+    return lh.earlierThan(rh);
+}
+
+pub const transaction_log_header =
+    \\date	amount	payee	category	note	bank note	reconciled
+;
 
 const TransactionLog = struct {
     const TransactionList = SegmentedList(Transaction, 1024);
@@ -114,7 +127,7 @@ const TransactionLog = struct {
         const reader = &DelimitedRecordReader(@TypeOf(stream), '\t', 1024).init(stream, allocator);
         {
             const headers = (try reader.nextLine()) orelse return error.FileIsEmpty;
-            if (!mem.eql(u8, "date\tamount\tpayee\tcategory\tnote\tbank note\treconciled", headers.line)) {
+            if (!mem.eql(u8, transaction_log_header, headers.line)) {
                 return error.InvalidHeader;
             }
         }
@@ -131,7 +144,7 @@ const TransactionLog = struct {
             };
             try result.sorted.append(transaction);
         }
-        sort(*Transaction, result.sorted.items, Transaction.earlierThan);
+        sort(*Transaction, result.sorted.items, {}, sortTransaction);
         return result;
     }
 };

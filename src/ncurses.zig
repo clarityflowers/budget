@@ -1,6 +1,8 @@
 const c = @cImport({
     @cInclude("ncurses.h");
 });
+const std = @import("std");
+const io = std.io;
 
 fn check(val: c_int) !void {
     if (val == c.ERR) return error.NCursesError;
@@ -34,6 +36,18 @@ pub const Window = struct {
 
     pub fn keypad(self: @This(), bf: bool) !void {
         try check(c.keypad(self.ptr, bf));
+    }
+
+    pub const WriteError = error{NCursesPrintFailed};
+    pub const Writer = io.Writer(@This(), WriteError, write);
+
+    pub fn writer(self: @This()) Writer {
+        return Writer{ .context = self };
+    }
+
+    fn write(self: @This(), str: []const u8) WriteError!usize {
+        if (c.wprintw(self.ptr, @intToPtr([*c]u8, @ptrToInt(str.ptr))) == c.ERR) return WriteError.NCursesPrintFailed;
+        return str.len;
     }
 };
 
