@@ -15,12 +15,12 @@ pub const StringLibrary = struct {
     pub fn save(self: *@This(), string: []const u8) ![]const u8 {
         const get_or_put = try self.map.getOrPut(string);
         if (!get_or_put.found_existing) {
-            get_or_put.kv.key = self.copy(string) catch |err| {
+            get_or_put.entry.key = self.copy(string) catch |err| {
                 _ = self.map.remove(string);
                 return err;
             };
         }
-        return get_or_put.kv.key;
+        return get_or_put.entry.key;
     }
 
     fn copy(self: @This(), value: []const u8) ![]u8 {

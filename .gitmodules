@@ -7,3 +7,12 @@
 [submodule "src/zig-args"]
 	path = src/zig-args
 	url = https://github.com/MasterQ32/zig-args.git
+[submodule "src/sqlite-zig"]
+	path = src/sqlite-zig
+	url = https://github.com/leroycep/sqlite-zig.git
+[submodule "notcurses"]
+	path = notcurses
+	url = https://github.com/dankamongmen/notcurses.git
+[submodule "src/zig-date"]
+	path = src/zig-date
+	url = https://github.com/clarityflowers/zig-date.git

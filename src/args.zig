@@ -4,6 +4,7 @@ const process = std.process;
 const heap = std.heap;
 const mem = std.mem;
 const zig_args = @import("zig-args/args.zig");
+const log = std.log.scoped(.budget);
 
 const BufSet = std.BufSet;
 const ArrayList = std.ArrayList;
@@ -19,22 +20,21 @@ const expectEqual = testing.expectEqual;
 const expectEqualStrings = testing.expectEqualStrings;
 const expectError = testing.expectError;
 
+pub const Error = error{
+    InvalidArguments,
+    OutOfMemory,
+    Unexpected,
+};
+
 pub fn ParseArgsResult(comptime Spec: type) type {
     return struct {
         arena: ArenaAllocator,
         options: Spec,
-        positionals: []const []const u8,
         exe_name: []const u8,
 
         pub fn deinit(self: *@This()) void {
             arena.deinit();
         }
-    };
-}
-
-fn InternalParseArgsResult(comptime Spec: type) type {
-    return struct {
-        options: Spec, positionals: []const []const u8
     };
 }
 
@@ -51,13 +51,17 @@ pub const TestArgIterator = struct {
     }
 };
 
-fn runMainFn(result: var, positionals: []const []const u8, arena: ArenaAllocator, exe_name: []const u8, context: var) !void {
-    const Spec = @TypeOf(result);
+fn runMainFn(result: anytype, context: anytype) !void {
+    const Spec = @TypeOf(result.options);
     if (@typeInfo(Spec) == .Union) {
-        const tagName = @tagName(result);
+        const tagName = @tagName(result.options);
         inline for (@typeInfo(Spec).Union.fields) |fld| {
             if (mem.eql(u8, tagName, fld.name)) {
-                try runMainFn(@field(result, fld.name), positionals, arena, exe_name, context);
+                try runMainFn(ParseArgsResult(fld.field_type){
+                    .options = @field(result.options, fld.name),
+                    .arena = result.arena,
+                    .exe_name = result.exe_name,
+                }, context);
                 return;
             }
         }
@@ -74,64 +78,118 @@ fn runMainFn(result: var, positionals: []const []const u8, arena: ArenaAllocator
         const return_info = @typeInfo(exec_info.Fn.return_type.?);
         if (return_info != .ErrorUnion) @compileError(err);
         if (return_info.ErrorUnion.payload != void) @compileError(err);
-        try Spec.exec(ParseArgsResult(Spec){
-            .arena = arena,
-            .options = result,
-            .positionals = positionals,
-            .exe_name = exe_name,
-        }, context);
+        try Spec.exec(result, context);
     }
 }
 
-pub fn parseAndRun(comptime Spec: type, iterator: var, allocator: *Allocator, err_stream: var, context: var) !void {
-    const result = try parseWithGivenArgs(Spec, iterator, allocator, err_stream);
-    try runMainFn(result.options, result.positionals, result.arena, result.exe_name, context);
+pub fn parseWithGivenArgsAndRun(comptime Spec: type, iterator: anytype, allocator: *Allocator, context: anytype) !void {
+    const result = try parseWithGivenArgs(Spec, iterator, allocator);
+    try runMainFn(result, context);
+}
+pub fn parseAndRun(comptime Spec: type, allocator: *Allocator, context: anytype) !void {
+    const result = try parse(Spec, allocator);
+    try runMainFn(result, context);
 }
 
-pub fn parseWithGivenArgs(comptime Spec: type, iterator: var, allocator: *Allocator, err_stream: var) !ParseArgsResult(Spec) {
+pub fn parse(comptime Spec: type, allocator: *Allocator) Error!ParseArgsResult(Spec) {
     var arena = ArenaAllocator.init(allocator);
     errdefer arena.deinit();
-    var exe_name: []const u8 = try (iterator.next(&arena.allocator) orelse return error.EmptyArgsIterator);
-    const result = try parseInternal(Spec, iterator, &arena.allocator, err_stream);
+    var iterator = try ArgIterator.initWithAllocator(allocator);
+    var exe_name: []const u8 = try (iterator.next(&arena.allocator) orelse "");
+    const result = try parseInternal(Spec, &iterator, &arena.allocator);
     return ParseArgsResult(Spec){
         .arena = arena,
-        .options = result.options,
-        .positionals = result.positionals,
+        .options = result,
         .exe_name = exe_name,
     };
 }
 
-fn parseInternal(comptime Spec: type, args: var, allocator: *Allocator, err_stream: var) !InternalParseArgsResult(Spec) {
+pub fn parseWithGivenArgs(comptime Spec: type, iterator: anytype, allocator: *Allocator) !ParseArgsResult(Spec) {
+    var arena = ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    var exe_name: []const u8 = try (iterator.next(&arena.allocator) orelse return error.EmptyArgsIterator);
+    const result = try parseInternal(Spec, iterator, &arena.allocator);
+    return ParseArgsResult(Spec){
+        .arena = arena,
+        .options = result.options,
+        .exe_name = exe_name,
+    };
+}
+
+fn positionalField(comptime Spec: type) ?std.builtin.TypeInfo.StructField {
+    inline for (@typeInfo(Spec).Struct.fields) |spec_field| {
+        if (std.mem.eql(u8, spec_field.name, "_")) {
+            var result: ?std.builtin.TypeInfo.StructField = null;
+            comptime var seen_optionals: bool = false;
+            for (@typeInfo(spec_field.field_type).Struct.fields) |positional_field| {
+                if (positional_field.field_type == []const u8) continue;
+                switch (@typeInfo(positional_field.field_type)) {
+                    .Pointer => |ptr| {
+                        switch (ptr.size) {
+                            .One, .C => @compileError("Cannot handle positional type " ++ @typeName(fld.field_type) ++ "."),
+                            .Slice, .Many => {
+                                if (result != null) @compileError("You can't use multiple variadic positional arguments, because there's no way of telling when one ends and the other begins!");
+                                result = positional_field;
+                            },
+                        }
+                    },
+                    .Optional => {
+                        seen_optionals = true;
+                    },
+                    else => {
+                        if (seen_optionals) @compileError("Required positionals cannot occur after optional positionals");
+                    },
+                }
+            }
+            return result;
+        }
+    }
+    return null;
+}
+fn PositionalArrayElement(comptime Spec: type) ?type {
+    const field = positionalField(Spec) orelse return null;
+    if (@typeInfo(field.field_type).Pointer.size != .Many) return null;
+    return @typeInfo(field.field_type).Pointer.child;
+}
+fn PositionalArray(comptime Spec: type) type {
+    const Element = PositionalArrayElement(Spec) orelse return void;
+    return ArrayList(Element);
+}
+
+fn parseInternal(comptime Spec: type, args: anytype, allocator: *Allocator) Error!Spec {
     if (@TypeOf(args) != *ArgIterator and @TypeOf(args) != *TestArgIterator) {
         @compileError("expected type '" ++ @typeName(*ArgIterator) ++ "' or '" ++ @typeName(*TestArgIterator) ++ "', found '" ++ @typeName(@TypeOf(args)) ++ "'.");
     }
     const spec_info = @typeInfo(Spec);
     switch (spec_info) {
+        .Void => {},
         .Union => |union_spec| {
             if (union_spec.tag_type == null) {
                 @compileError("Union specs must be tagged.");
             }
             const command = try (args.next(allocator) orelse {
-                _ = try err_stream.write("Missing command, expected one of: " ++ joinFieldNames(union_spec.fields, ", ") ++ ".");
-                return error.MissingCommand;
+                log.alert("Missing command, expected one of: " ++ joinFieldNames(union_spec.fields, ", ") ++ ".", .{});
+                return Error.InvalidArguments;
             });
             inline for (union_spec.fields) |field| {
                 if (mem.eql(u8, field.name, command)) {
-                    const command_result = try parseInternal(field.field_type, args, allocator, err_stream);
-                    return InternalParseArgsResult(Spec){
-                        .options = @unionInit(Spec, field.name, command_result.options),
-                        .positionals = command_result.positionals,
-                    };
+                    return @unionInit(
+                        Spec,
+                        field.name,
+                        try parseInternal(field.field_type, args, allocator),
+                    );
                 }
             }
-            try err_stream.print("Unexpected command {}, expected one of: " ++ joinFieldNames(union_spec.fields, ", ") ++ ".", .{command});
-            return error.UnexpectedCommand;
+            log.alert("Unexpected command {}, expected one of: " ++ joinFieldNames(union_spec.fields, ", ") ++ ".", .{command});
+            return Error.InvalidArguments;
         },
         .Struct => |struct_spec| {
-            var positionals = &ArrayList([]const u8).init(allocator);
             var options: Spec = undefined;
+            var positionals_consumed: usize = 0;
 
-            const options_consumed = &BufSet.init(allocator);
+            var positionals_array: PositionalArray(Spec) = if (PositionalArray(Spec) == void) {} else PositionalArray(Spec).init(allocator);
+
+            var options_consumed = BufSet.init(allocator);
 
             while (args.next(allocator)) |arg_or_error| {
                 const arg = try arg_or_error;
@@ -155,53 +213,97 @@ fn parseInternal(comptime Spec: type, args: var, allocator: *Allocator, err_stre
                         };
 
                     var found = found_blk: inline for (struct_spec.fields) |fld| {
-                        if (std.mem.eql(u8, kv.name, fld.name)) {
-                            @field(options, fld.name) = try parseOption(Spec, &options, args, fld.name, kv.value, allocator, err_stream);
-                            try options_consumed.put(fld.name);
-                            break :found_blk true;
+                        comptime const check_field = !mem.startsWith(u8, fld.name, "_");
+                        if (check_field) {
+                            if (std.mem.eql(u8, kv.name, fld.name)) {
+                                @field(options, fld.name) = try parseOption(
+                                    fld.field_type,
+                                    args,
+                                    fld.name,
+                                    kv.value,
+                                    allocator,
+                                );
+                                try options_consumed.put(fld.name);
+                                break :found_blk true;
+                            }
                         }
                     } else false;
 
                     if (!found) {
-                        try err_stream.print("Unknown option: {}\n", .{kv.name});
-                        return error.UnknownOption;
+                        log.alert("Unknown option {}\n", .{kv.name});
+                        return Error.InvalidArguments;
                     }
                 } else {
-                    try positionals.append(arg);
+                    if (!@hasField(Spec, "_")) {
+                        log.alert("Unexpected positional arguments passed.", .{});
+                        return Error.InvalidArguments;
+                    }
+                    inline for (@typeInfo(@TypeOf(options._)).Struct.fields) |fld, index| {
+                        const field_info = @typeInfo(fld.field_type);
+                        if (field_info == .Pointer and field_info.Pointer.child != u8) {
+                            @compileError("TODO - implement this (got " ++ @typeName(fld.field_type) ++ ")"); //TODO
+                        } else {
+                            if (index == positionals_consumed) {
+                                @field(options._, fld.name) = try parseOption(
+                                    fld.field_type,
+                                    args,
+                                    fld.name,
+                                    arg,
+                                    allocator,
+                                );
+                                positionals_consumed += 1;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
 
             inline for (@typeInfo(Spec).Struct.fields) |fld| {
-                if (mem.startsWith(u8, fld.name, "_")) {
-                    // continue
-                } else if (fld.field_type == bool and fld.default_value == true) {
-                    @compileError("Error with option \"" ++ fld.name ++ "\": booleans cannot default to true. Instead try inverting your option (for example, change \"--enable-property\" to \"--disable-property\".");
-                } else if (!options_consumed.exists(fld.name)) {
-                    if (fld.field_type == bool) {
-                        @field(options, fld.name) = false;
-                    } else if (fld.default_value) |default_value| {
-                        @field(options, fld.name) = default_value;
-                    } else if (@typeInfo(fld.field_type) == .Optional) {
-                        @field(options, fld.name) = null;
-                    } else {
-                        _ = try err_stream.write("Required option \"--" ++ fld.name ++ "\" was missing.");
-                        return error.MissingOption;
+                if (comptime mem.eql(u8, fld.name, "_")) {
+                    inline for (@typeInfo(fld.field_type).Struct.fields) |positional_field, index| {
+                        if (positionals_consumed < index + 1) {
+                            @field(options._, positional_field.name) = try defaultValue(positional_field, true);
+                        }
                     }
+                } else if (mem.startsWith(u8, fld.name, "_")) {
+                    //continue
+                } else if (fld.field_type == bool and fld.default_value == true) {} else if (!options_consumed.exists(fld.name)) {
+                    @field(options, fld.name) = try defaultValue(fld, false);
                 }
             }
 
             while (args.next(allocator)) |arg_or_error| {
                 const arg = try arg_or_error;
-                try positionals.append(arg);
+                // try positionals.append(arg);
             }
-            return InternalParseArgsResult(Spec){
-                .options = options,
-                .positionals = positionals.toOwnedSlice(),
-            };
+            return options;
         },
         else => @compileError("Spec must be a struct or tagged union, but it was " ++ @typeName(Spec) ++ " instead."),
     }
 }
+
+fn defaultValue(comptime fld: std.builtin.TypeInfo.StructField, comptime is_positional: bool) Error!fld.field_type {
+    if (fld.field_type == bool) {
+        if (fld.default_value == true) {
+            @compileError("Error with option \"" ++ fld.name ++ "\": booleans cannot default to true. Instead try inverting your option (for example, change \"--enable-property\" to \"--disable-property\".");
+        }
+        return false;
+    } else if (fld.default_value) |default_value| {
+        return default_value;
+    } else if (@typeInfo(fld.field_type) == .Optional) {
+        return null;
+    } else {
+        log.alert("Missing " ++ (if (is_positional) "positional argument \"" else "option \"--") ++ fld.name ++ "\".", .{});
+        return Error.InvalidArguments;
+    }
+}
+
+fn checkIsPresent(
+    options: anytype,
+    fld: std.builtin.TypeInfo.StructField,
+    options_consumed: BufSet,
+) !void {}
 
 pub const NullOutStream = struct {
     const Error = error{};
@@ -302,7 +404,7 @@ test "handles int overflow" {
         },
     };
     const res = parseWithGivenArgs(TestSpec, &iterator, &arena.allocator, &nullOutStream());
-    expectError(error.FailedToParseInt, res);
+    expectError(Error.InvalidArguments, res);
 }
 
 test "can handle float options" {
@@ -334,7 +436,7 @@ test "alerts on missing options" {
         },
     };
     const res = parseWithGivenArgs(TestSpec, &iterator, &arena.allocator, &nullOutStream());
-    expectError(error.MissingOption, res);
+    expectError(Error.InvalidArguments, res);
 }
 
 test "handles commands" {
@@ -384,7 +486,7 @@ test "calls exec fn" {
     expect(test_function_called);
 }
 
-fn joinFieldNames(comptime fields: var, comptime joint: []const u8) []const u8 {
+fn joinFieldNames(comptime fields: anytype, comptime joint: []const u8) []const u8 {
     var str: []const u8 = "";
     for (fields) |field, i| {
         if (i != 0) str = str ++ joint;
@@ -426,7 +528,7 @@ fn parseBoolean(str: []const u8) !bool {
     else if (std.mem.eql(u8, str, "n"))
         false
     else
-        return error.NotABooleanValue;
+        return ArgumentError.FailedToParseBoolean;
 }
 
 const ArgumentError = error{
@@ -436,72 +538,65 @@ const ArgumentError = error{
     FailedToParseEnum,
 };
 /// Converts an argument value to the target type.
-fn convertArgumentValue(comptime T: type, textInput: []const u8) ArgumentError!T {
-    if (T == []const u8)
+fn convertArgumentValue(comptime T: type, textInput: []const u8) !T {
+    if (T == []const u8) {
         return textInput;
+    }
     switch (@typeInfo(T)) {
         .Optional => |opt| return try convertArgumentValue(opt.child, textInput),
         .Bool => if (textInput.len > 0)
-            return parseBoolean(textInput) catch ArgumentError.FailedToParseBoolean
+            return parseBoolean(textInput)
         else
             return true, // boolean options are always true
         .Int => |int| return if (int.is_signed)
-            std.fmt.parseInt(T, textInput, 10) catch ArgumentError.FailedToParseInt
+            std.fmt.parseInt(T, textInput, 10)
         else
-            std.fmt.parseUnsigned(T, textInput, 10) catch ArgumentError.FailedToParseInt,
-        .Float => return std.fmt.parseFloat(T, textInput) catch ArgumentError.FailedToParseFloat,
-        .Enum => return std.meta.stringToEnum(T, textInput) orelse return error.FailedtoParseEnum,
+            std.fmt.parseUnsigned(T, textInput, 10),
+        .Float => return std.fmt.parseFloat(T, textInput),
+        .Enum => return std.meta.stringToEnum(T, textInput) orelse error.ArgumentError,
         else => @compileError(@typeName(T) ++ " is not a supported argument type!"),
     }
 }
 
 /// Parses an option value into the correct type.
 fn parseOption(
-    comptime Spec: type,
-    options: *Spec,
-    args: var,
+    comptime field_type: type,
+    args: anytype,
     /// The name of the option that is currently parsed.
     comptime name: []const u8,
     /// Optional pre-defined value for options that use `--foo=bar`
     value: ?[]const u8,
     allocator: *Allocator,
-    err_stream: var,
-) !@TypeOf(@field(options, name)) {
-    const field_type = @TypeOf(@field(options, name));
-
+) !field_type {
     const argval = if (requiresArg(field_type))
         value orelse
             try (args.next(allocator) orelse {
-            try err_stream.print(
+            log.alert(
                 "Missing argument for {}.\n",
                 .{name},
             );
-            return error.MissingArgument;
+            return Error.InvalidArguments;
         })
     else
         (value orelse "");
 
     return convertArgumentValue(field_type, argval) catch |err| {
-        try err_stream.print("Failed to parse option {}. Expected: {}, found: {}\n", .{
+        log.alert("Failed to parse option {}. Expected: {}, found: {}\n", .{
             name,
-            switch (err) {
-                error.FailedToParseInt => @as([]const u8, "integer value of size " ++ @typeName(field_type)),
-                error.FailedToParseFloat => "float of type " ++ @typeName(field_type),
-                error.FailedToParseBoolean => "true or false",
-                error.FailedToParseEnum => blk: {
-                    var info = switch (@typeInfo(field_type)) {
-                        .Enum => |en| en,
-                        .Optional => |opt| switch (@typeInfo(opt.child)) {
-                            .Enum => |en| en,
-                            else => unreachable,
-                        },
-                        else => unreachable,
-                    };
-                    break :blk "one of: " ++ joinFieldNames(info.fields, ", ") ++ ".";
-                },
-            },
+            getExpectedValue(field_type),
             argval,
         });
-        return err;
+        return Error.InvalidArguments;
+    };
+}
+
+pub fn getExpectedValue(comptime field_type: type) []const u8 {
+    return switch (@typeInfo(field_type)) {
+        .Optional => |fld| getExpectedValue(fld.child),
+        .Int => |fld| @as([]const u8, fld.bits ++ "-bit " ++ if (fld.signed) "" else "un" ++ "signed integer"),
+        .Float => |fld| fld.bits + "-bit float",
+        .Bool => "true or false",
+        .Enum => |fld| "one of: " ++ joinFieldNames(fld.fields, ", ") ++ ".",
+        else => @compileError("Unexpected type " ++ @typeName(field_type)),
     };
 }

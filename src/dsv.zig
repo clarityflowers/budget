@@ -12,43 +12,59 @@ const expectError = testing.expectError;
 const parse = @import("parse.zig");
 const Date = @import("dates.zig").Date;
 
-pub fn DelimitedValueReader(comptime delimiter: u8) type {
-    return struct {
-        token_start: usize = 0,
-        line: []const u8,
+pub const DelimitedValueReader = struct {
+    delimiter: u8 = ',',
+    token_start: usize = 0,
+    line: []const u8,
 
-        /// the value's lifetime is the same as the line's
-        pub fn nextValue(self: *@This()) ![]const u8 {
-            if (self.token_start >= self.line.len) return error.NoMoreValues;
-            const quoted = self.line[self.token_start] == '"';
-            if (quoted) self.token_start += 1;
-            var token_end = self.token_start;
-            while (token_end < self.line.len) : (token_end += 1) {
-                const token = self.line[token_end];
-                if (quoted) {
-                    if (token == '"' and (token_end == self.line.len - 1 or self.line[token_end + 1] == delimiter)) {
-                        break;
-                    }
-                } else if (token == delimiter) {
+    /// the value's lifetime is the same as the line's
+    pub fn nextValue(self: *@This()) ?[]const u8 {
+        if (self.token_start >= self.line.len) return null;
+        const quoted = self.line[self.token_start] == '"';
+        if (quoted) self.token_start += 1;
+        var token_end = self.token_start;
+        while (token_end < self.line.len) : (token_end += 1) {
+            const token = self.line[token_end];
+            if (quoted) {
+                if (token == '"' and (token_end == self.line.len - 2 or self.line[token_end + 1] == self.delimiter)) {
                     break;
                 }
+            } else if (token == self.delimiter) {
+                break;
             }
-
-            const result = self.line[self.token_start..token_end];
-            if (quoted) token_end += 1;
-            self.token_start = token_end + 1;
-            return result;
         }
 
-        pub fn nextValueAsCents(self: *@This(), comptime T: type) !T {
-            return try parse.parseCents(T, try self.nextValue());
-        }
+        const result = self.line[self.token_start..token_end];
+        if (quoted) token_end += 1;
+        self.token_start = token_end + 1;
+        return result;
+    }
 
-        pub fn nextValueAsDate(self: *@This()) !Date {
-            return try Date.parse(try self.nextValue());
+    /// Appends all values in the line onto the given array list, and returns a span containing
+    /// those values.
+    pub fn collectIntoArrayList(self: *@This(), list: *std.ArrayList([]const u8)) ![][]const u8 {
+        const start = list.items.len;
+        while (self.nextValue()) |value| {
+            try list.append(value);
         }
-    };
-}
+        return list.items[start..];
+    }
+
+    /// Returns all of the values in the line into a caller-owned slice.
+    pub fn collect(self: *@This(), allocator: *std.mem.Allocator) ![][]const u8 {
+        var list = std.ArrayList([]const u8).init(allocator);
+        errdefer list.deinit();
+        return try self.collectIntoArrayList(&list);
+    }
+
+    pub fn nextValueAsCents(self: *@This(), comptime T: type) !T {
+        return try parse.parseCents(T, try self.nextValue());
+    }
+
+    pub fn nextValueAsDate(self: *@This()) !Date {
+        return try Date.parse(try self.nextValue());
+    }
+};
 
 test "read quoted csv" {
     const csv =
