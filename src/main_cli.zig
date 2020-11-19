@@ -69,7 +69,7 @@ pub const Bytes = struct {
     }
 };
 
-pub fn main() !u8 {
+pub fn mainWrapped() !void {
     var gpa = MemPerfAllocator(std.builtin.mode == .Debug){};
     defer {
         if (std.builtin.mode == .Debug) {
@@ -80,7 +80,11 @@ pub fn main() !u8 {
     }
     var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
     defer arena.deinit();
-    zig_args.parseAndRun(Spec, &arena.allocator, Context{ .allocator = &arena.allocator }) catch |err| switch (err) {
+    try zig_args.parseAndRun(Spec, &arena.allocator, Context{ .allocator = &arena.allocator });
+}
+
+pub fn main() !u8 {
+    mainWrapped() catch |err| switch (err) {
         error.InvalidArguments => {
             if (std.builtin.mode == .Debug) return err;
             return 1;

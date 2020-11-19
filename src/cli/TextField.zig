@@ -47,11 +47,11 @@ pub fn set(self: *@This(), new_str: []const u8) !void {
 pub fn render(
     self: *@This(),
     input_key: ?ncurses.Key,
-    window: *ncurses.Window,
+    window: *ncurses.Box,
     top: usize,
     placeholder: []const u8,
 ) !bool {
-    const x = window.getx();
+    const x = window.getx() orelse return false;
     var input = input_key;
     const writer = window.writer();
     if (self.err.items.len > 0 and input != null) {
@@ -69,7 +69,7 @@ pub fn render(
         .line = top,
         .column = x,
     });
-    window.cursor = .normal;
+    window.setCursor(.normal);
     if (self.str.items.len == 0) {
         window.attrSet(attr(.dim)) catch {};
         writer.writeAll(placeholder) catch {};

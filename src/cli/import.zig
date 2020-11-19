@@ -12,8 +12,6 @@ pub fn runInteractiveImport(
     data: import.PreparedImport,
     allocator: *std.mem.Allocator,
 ) !void {
-    log.debug("Entering interactive mode", .{});
-
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -22,7 +20,7 @@ pub fn runInteractiveImport(
     try ncurses.startColor();
     try ncurses.raw();
     try ncurses.noecho();
-    try window.nodelay(true);
+    // try window.nodelay(true);
     _ = c.setlocale(c.LC_ALL, "en_US.UTF-8");
     try ncurses.nonl();
     try ncurses.useDefaultColors();
@@ -32,7 +30,7 @@ pub fn runInteractiveImport(
     try window.intrflush(true);
     try window.refresh();
     try window.scrollOkay(false);
-    const writer = window.writer();
+    const writer = window.wholeBox().writer();
     // var i: c_int = 0;
     // window.wrap = true;
     // while (i < ncurses.COLORS) : (i += 1) {
@@ -46,15 +44,20 @@ pub fn runInteractiveImport(
     //     std.time.sleep(1000);
     // }
 
-    var screen = try Screen.init(db, &window, data, allocator);
+    var screen = try Screen.init(db, data, allocator);
+    var box = window.wholeBox();
+
     defer screen.deinit();
+    if (try screen.render(&box, null)) return;
+
     while (true) {
         const input = window.getChar() catch null;
-        try window.erase();
-        if (try screen.render(input)) break;
-        try window.refresh();
-        if (input == null) {
-            std.time.sleep(1000);
+        window.erase() catch {};
+        if (try screen.render(&box, input)) break;
+        if (input != null) {
+            window.erase() catch {};
+            if (try screen.render(&box, null)) break;
         }
+        try window.refresh();
     }
 }

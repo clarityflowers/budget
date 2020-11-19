@@ -493,14 +493,6 @@ pub fn prepareImport(
     var categories = try getCategories(db, category_groups, &arena.allocator);
 
     try autofillCategories(db, imported_transactions, &categories);
-
-    for (imported_transactions) |transaction| {
-        log.debug("{d: >8.2} {: <16} {}", .{
-            @intToFloat(f64, transaction.amount) / 100,
-            transaction.category,
-            transaction.payee,
-        });
-    }
     return PreparedImport{
         .accounts = accounts,
         .payees = payees,

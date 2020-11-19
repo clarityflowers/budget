@@ -27,8 +27,8 @@ pub fn log(
     const include_scope = !std.io.getStdIn().isTty() or !std.io.getStdOut().isTty();
 
     if (@enumToInt(log_level) > @enumToInt(std.log.level)) return;
-
-    ncurses.end();
+    const needs_end = ncurses.isEnd() == false;
+    if (needs_end) ncurses.end();
 
     if (use_colors) {
         comptime const color_for_level = getColorForLevel(log_level);
@@ -47,6 +47,11 @@ pub fn log(
             nosuspend stderr.print("budget: " ++ level_tag ++ format ++ "\n", args) catch return;
         } else {
             nosuspend stderr.print(level_tag ++ format ++ "\n", args) catch return;
+        }
+    }
+    if (needs_end) {
+        if (ncurses.getStdScreen()) |window| {
+            window.refresh() catch {};
         }
     }
 }

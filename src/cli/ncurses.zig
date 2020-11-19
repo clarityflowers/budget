@@ -291,6 +291,7 @@ pub const key = struct {
 pub const Window = struct {
     ptr: *c.WINDOW,
     out_of_bounds: bool = false,
+    elipses: bool = false,
     wrap: bool = false,
     cursor: CursorState = .normal,
 
@@ -300,6 +301,16 @@ pub const Window = struct {
         } else {
             return error.NCursesError;
         }
+    }
+
+    pub fn subwin(self: *@This(), position: Position, lines: usize, cols: usize) Window {
+        const maybe_ptr = if (self.ptr == getStdScreen().?.ptr)
+            c.newwin(lines, cols, position.line, position.column)
+        else
+            c.subwin(self.ptr, lines, cols, position.line, position.column);
+        if (maybe_ptr) |ptr| {
+            return Window{ .ptr = ptr };
+        } else return error.NCursesError;
     }
 
     /// The  keypad option enables the keypad of the user's terminal.  If enabled
@@ -315,58 +326,9 @@ pub const Window = struct {
         try check(c.keypad(self.ptr, bf));
     }
 
-    pub const WriteError = error{ NCursesError, InvalidUtf8 };
-    pub const Writer = io.Writer(*@This(), WriteError, write);
-
-    pub fn writer(self: *@This()) Writer {
-        return Writer{ .context = self };
-    }
-
-    const elipses: [4]c_int = [4]c_int{ '.', '.', '.', 0 };
-
-    fn write(self: *@This(), str: []const u8) WriteError!usize {
-        if (self.out_of_bounds) return str.len;
-        var view = try std.unicode.Utf8View.init(str);
-        var it = view.iterator();
-        while (it.nextCodepoint()) |codepoint| {
-            if (!self.wrap) {
-                if (self.getx() >= self.getMaxPosition().column - 3) {
-                    while (self.getx() != 0) {
-                        try check(c.addwstr(&[_]c_int{'.'}));
-                    }
-                    break;
-                }
-            }
-            const as_c_int: [2]c_int = .{ codepoint, 0 };
-            try check(c.addwstr(
-                @ptrCast([*c]const c_int, &as_c_int),
-            ));
-        }
-        return str.len;
-    }
-
-    pub fn writeCodepoint(self: @This(), codepoint: c_uint) WriteError!void {
-        try check(c.waddnwstr(
-            self.ptr,
-            @ptrCast([*c]const c_int, &codepoint),
-            1,
-        ));
-    }
-
-    pub fn writeCodepoints(self: @This(), codepoints: []const u21) WriteError!void {
-        for (codepoints) |codepoint| {
-            try self.writeCodepoint(codepoint);
-        }
-    }
-
-    pub fn fillLine(self: @This(), codepoint: c_uint) WriteError!void {
-        try self.writeCodepoint(codepoint);
-        while (self.getx() != 0) {
-            try self.writeCodepoint(codepoint);
-        }
-    }
-
     pub fn move(self: *@This(), position: Position) void {
+        self.out_of_bounds = false;
+        self.elipses = false;
         var new_position = position;
         while (new_position.column >= self.getMaxPosition().column) {
             new_position.column -= self.getMaxPosition().column;
@@ -412,18 +374,11 @@ pub const Window = struct {
         };
     }
 
-    pub const Position = struct {
-        column: usize = 0,
-        line: usize = 0,
-    };
     pub inline fn getMaxPosition(self: @This()) Position {
         return .{
             .column = @intCast(usize, c.getmaxx(self.ptr)),
             .line = @intCast(usize, c.getmaxy(self.ptr)),
         };
-    }
-    pub fn attrSet(self: @This(), attr: c_int) !void {
-        try check(c.wattrset(self.ptr, attr));
     }
     pub fn getChar(self: @This()) !Key {
         var wide_char: c_int = undefined;
@@ -456,6 +411,209 @@ pub const Window = struct {
     /// minal, it is also necessary to call idlok).
     pub fn scrollOkay(self: @This(), value: bool) !void {
         try check(c.scrollok(self.ptr, value));
+    }
+
+    pub fn box(self: *@This(), bounds: Rectangle) Box {
+        var actual_bounds = bounds;
+        const far_corner = actual_bounds.position().plus(actual_bounds.size());
+        const max = self.getMaxPosition();
+        if (far_corner.column >= max.column) actual_bounds.width = max.column;
+        if (far_corner.line >= max.line) actual_bounds.height = max.line;
+        return .{
+            .bounds = actual_bounds,
+            .window = self,
+        };
+    }
+
+    pub fn wholeBox(self: *@This()) Box {
+        const max_position = self.getMaxPosition();
+        return self.box(.{
+            .width = max_position.column,
+            .height = max_position.line,
+        });
+    }
+};
+
+pub const Position = struct {
+    column: usize = 0,
+    line: usize = 0,
+
+    pub fn plus(self: @This(), other: @This()) @This() {
+        return .{
+            .column = self.column + other.column,
+            .line = self.line + other.line,
+        };
+    }
+
+    pub fn minus(self: @This(), other: @This()) @This() {
+        return .{
+            .column = self.column - other.column,
+            .line = self.line - other.line,
+        };
+    }
+
+    pub fn inside(self: @This(), bounds: Rectangle) bool {
+        return self.column >= bounds.column and
+            self.column < bounds.column + bounds.width and
+            self.line >= bounds.line and
+            self.line < bounds.line + bounds.height;
+    }
+};
+
+pub const Rectangle = struct {
+    line: usize = 0,
+    column: usize = 0,
+    width: usize = 0,
+    height: usize = 0,
+
+    pub fn position(self: @This()) Position {
+        return .{ .line = self.line, .column = self.column };
+    }
+    pub fn size(self: @This()) Position {
+        return .{ .line = self.height, .column = self.width };
+    }
+};
+
+pub const Box = struct {
+    window: *Window,
+    bounds: Rectangle,
+    out_of_bounds: bool = false,
+    wrap: bool = false,
+    elipses: bool = false,
+
+    pub fn setCursor(self: *@This(), cursor: CursorState) void {
+        self.window.cursor = cursor;
+    }
+
+    pub fn getx(self: @This()) ?usize {
+        return if (self.getPosition()) |position| position.column else null;
+    }
+
+    pub fn gety(self: @This()) ?usize {
+        return if (self.getPosition()) |position| position.line else null;
+    }
+
+    pub fn fillLine(self: *@This(), codepoint: u21) WriteError!void {
+        if (self.getx()) |x| {
+            var i = x;
+            while (i < self.bounds.width) : (i += 1) {
+                try self.writeCodepoint(codepoint);
+            }
+        }
+    }
+
+    pub fn move(self: *@This(), position: Position) void {
+        const new_position = position.plus(self.bounds.position());
+        // log.debug("New position: {}\n{}\n{}\n", .{ self.bounds, position, new_position });
+        if (new_position.inside(self.bounds)) {
+            self.window.move(new_position);
+            self.out_of_bounds = false;
+        } else {
+            self.out_of_bounds = true;
+        }
+    }
+
+    pub fn getPosition(self: @This()) ?Position {
+        if (self.out_of_bounds) return null;
+        const position = self.window.getPosition();
+        if (position.inside(self.bounds)) return position.minus(self.bounds.position());
+        return null;
+    }
+
+    pub const WriteError = error{ NCursesError, InvalidUtf8 };
+    pub const Writer = io.Writer(*@This(), WriteError, write);
+
+    pub fn writer(self: *@This()) Writer {
+        return Writer{ .context = self };
+    }
+
+    fn write(self: *@This(), str: []const u8) WriteError!usize {
+        const buffer_size = 32;
+        var buffer: [buffer_size]c.cchar_t = undefined;
+        var color: c_short = undefined;
+        var attrs: c.attr_t = undefined;
+        try check(c.wattr_get(self.window.ptr, &attrs, &color, null));
+
+        if (self.out_of_bounds) return str.len;
+        var view = try std.unicode.Utf8View.init(str);
+        var it = view.iterator();
+        var first = true;
+        var i: usize = 0;
+        while (i < buffer_size) : (i += 1) {
+            if (it.nextCodepoint()) |codepoint| {
+                const codepoint_int = @intCast(c_int, codepoint);
+                try check(c.setcchar(&buffer[i], &codepoint_int, attrs, color, null));
+            } else break;
+        }
+        try self.writeWideChars(buffer[0..i]);
+        return it.i;
+    }
+
+    pub fn writeWideChars(self: *@This(), chars: []const c.cchar_t) WriteError!void {
+        if (self.elipses) {
+            self.move(.{ .line = self.gety() orelse return, .column = self.bounds.width - 3 });
+            try self.writeCodepoints(&[_]u21{'.'} ** 3);
+            self.out_of_bounds = true;
+            return;
+        }
+        if (self.getPosition()) |position| {
+            if (self.wrap) {
+                var str_left = chars;
+                var distance_to_edge = self.bounds.column - position.column;
+                while (distance_to_edge < str_left.len) {
+                    try check(c.wadd_wchnstr(self.window.ptr, str_left.ptr, @intCast(c_int, distance_to_edge)));
+                    str_left = str_left[distance_to_edge..];
+                    distance_to_edge = self.bounds.width;
+                    self.move(.{ .line = (self.gety() orelse return) + 1 });
+                }
+                if (str_left.len > 0) {
+                    try check(c.wadd_wchnstr(self.window.ptr, str_left.ptr, @intCast(c_int, str_left.len)));
+                    self.move(.{ .line = (self.gety() orelse return), .column = position.column + str_left.len });
+                }
+            } else {
+                try check(c.wadd_wchnstr(self.window.ptr, chars.ptr, @intCast(c_int, chars.len)));
+                self.move(.{ .line = (self.gety() orelse return), .column = position.column + chars.len });
+            }
+        }
+    }
+
+    pub fn writeCodepoint(self: *@This(), codepoint: u21) WriteError!void {
+        try self.writeCodepoints(&[1]u21{codepoint});
+    }
+
+    pub fn writeCodepoints(self: *@This(), codepoints: []const u21) WriteError!void {
+        var buffer: [32]c.cchar_t = undefined;
+        var color: c_short = undefined;
+        var attrs: c.attr_t = undefined;
+        try check(c.wattr_get(self.window.ptr, &attrs, &color, null));
+        var i: usize = 0;
+        for (codepoints) |codepoint| {
+            defer i += 1;
+            const codepoint_int = @intCast(c_int, codepoint);
+            try check(c.setcchar(&buffer[i], &codepoint_int, attrs, color, null));
+            if (i == 31) {
+                try self.writeWideChars(&buffer);
+                i = 0;
+            }
+        }
+        try self.writeWideChars(buffer[0..i]);
+    }
+
+    pub fn attrSet(self: @This(), attr: c_int) !void {
+        try check(c.wattrset(self.window.ptr, attr));
+    }
+
+    pub fn box(self: @This(), bounds: Rectangle) Box {
+        var bounds_start = bounds.position().plus(self.bounds.position());
+        return .{
+            .window = self.window,
+            .bounds = .{
+                .line = bounds_start.line,
+                .column = bounds_start.column,
+                .width = if (bounds.width == 0) self.bounds.width - bounds.column else bounds.width,
+                .height = if (bounds.height == 0) self.bounds.height - bounds.line else bounds.height,
+            },
+        };
     }
 };
 

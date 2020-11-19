@@ -78,11 +78,10 @@ pub fn deinit(self: *@This()) void {
 pub fn render(
     self: *@This(),
     input_key: ?ncurses.Key,
-    window: *ncurses.Window,
+    window: *ncurses.Box,
 ) !bool {
     var input = input_key;
-    const top = window.gety();
-
+    window.move(.{});
     const writer = window.writer();
 
     if (self.err.items.len > 0) {
@@ -132,13 +131,12 @@ pub fn render(
                             consumed = true;
                         }
                     }
-                    window.cursor = .normal;
+                    window.setCursor(.normal);
                     window.attrSet(attr(.highlight)) catch {};
                     writer.writeAll(str[0 .. cursor.start + 1]) catch {};
                     window.attrSet(0) catch {};
                     writer.writeAll(str[cursor.start + 1 ..]) catch {};
                     window.move(.{
-                        .line = top,
                         .column = cursor.start,
                     });
                     return consumed;
@@ -178,13 +176,12 @@ pub fn render(
                             consumed = true;
                         }
                     }
-                    window.cursor = .normal;
+                    window.setCursor(.normal);
                     writer.writeAll(str[0..cursor.start]) catch {};
                     window.attrSet(attr(.highlight)) catch {};
                     writer.writeAll(str[cursor.start..]) catch {};
                     window.attrSet(0) catch {};
                     window.move(.{
-                        .line = top,
                         .column = cursor.start,
                     });
                     return consumed;
@@ -219,16 +216,39 @@ pub fn render(
                                 else
                                     .new;
 
-                                if (self.payee.* != .unknown or (edit.pattern.? == .once)) {
-                                    if (try self.setPayee(edit_payee)) {
-                                        return false;
-                                    } else |err| switch (err) {
-                                        error.Skip => {},
-                                        else => return err,
+                                @import("../log.zig").debug("Test {}\n{}\n", .{ self.payee, edit.pattern });
+                                if (self.payee.* == .unknown) {
+                                    switch (edit.pattern.?) {
+                                        .once => {
+                                            if (self.setPayee(edit_payee)) |id| {
+                                                return false;
+                                            } else |err| switch (err) {
+                                                error.Skip => {
+                                                    return true;
+                                                },
+                                                else => return err,
+                                            }
+                                        },
+                                        .exact => {
+                                            const str = self.payee.unknown;
+                                            if (self.setPayee(edit_payee)) |id| {
+                                                if (try self.db.createPayeeMatch(id, .exact, str)) {
+                                                    return false;
+                                                } else |err| {
+                                                    self.err.shrinkRetainingCapacity(0);
+                                                    self.err.writer().writeAll("Error creating payee match.", .{});
+                                                }
+                                            } else |err| switch (err) {
+                                                error.Skip => {
+                                                    return true;
+                                                },
+                                                else => return err,
+                                            }
+                                        },
+                                        .prefix, .suffix, .contains => {},
                                     }
-                                } else {
-                                    edit.payee = edit_payee;
                                 }
+                                edit.payee = edit_payee;
                             }
                         },
                         else => {},
@@ -248,11 +268,10 @@ pub fn render(
                     writer.writeAll(completion.name) catch {};
                     if (completion.sort_rank == 2) {
                         window.move(.{
-                            .line = top,
                             .column = "Transfer to ".len,
                         });
                     } else {
-                        window.move(.{ .line = top });
+                        window.move(.{});
                     }
                 }
                 window.attrSet(0) catch {};
@@ -262,18 +281,20 @@ pub fn render(
                 _ = try self.text_field.render(
                     input,
                     window,
-                    top,
+                    0,
                     "(enter a payee)",
                 );
                 const position = window.getPosition();
                 if (!perfect_match and self.text_field.value().len > 0 and self.text_field.err.items.len == 0) {
                     const action = "(create new payee)";
 
-                    window.move(.{ .line = top + 1 });
+                    window.move(.{ .line = 1 });
                     window.attrSet(attr(.attention)) catch {};
                     writer.writeAll(action) catch {};
                 }
-                window.move(position);
+                if (position) |p| {
+                    window.move(p);
+                }
 
                 return true;
             }
@@ -295,7 +316,7 @@ pub fn render(
                 _ = try self.text_field.render(
                     input,
                     window,
-                    top,
+                    0,
                     "(enter a new name)",
                 );
                 return true;
@@ -410,6 +431,8 @@ fn writeCodepoint(writer: anytype, codepoint: u21) !void {
     const len = try std.unicode.utf8Encode(codepoint, &buffer);
     try writer.writeAll(buffer[0..len]);
 }
+
+const log = @import("../log.zig");
 
 fn setPayee(self: *@This(), edit_payee: EditPayee) !Database.PayeeId {
     switch (edit_payee) {
