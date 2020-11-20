@@ -4,8 +4,9 @@ const ncurses = @import("ncurses.zig");
 const import = @import("../import.zig");
 const sqlite = @import("../sqlite-zig/src/sqlite.zig");
 const attr = @import("attributes.zig").attr;
-const Cursor = @import("cursor.zig");
+const Cursor = @import("Cursor.zig");
 const Database = @import("import_Database.zig");
+const PatternEditor = @import("import_PatternEditor.zig");
 
 text_field: TextField,
 mode: ?union(enum) {
@@ -25,20 +26,14 @@ allocator: *std.mem.Allocator,
 payee_autocompletes: std.ArrayList(PayeeAutocomplete),
 err: std.ArrayList(u8),
 
+const Pattern = union(enum) {
+    exact,
+    partial: PatternEditor,
+};
+
 const EditPayee = union(enum) {
     existing: Database.PayeeId,
     new,
-};
-
-const Pattern = union(enum) {
-    once,
-    exact,
-    prefix: Cursor,
-    suffix: Cursor,
-    contains: struct {
-        start: usize = 0,
-        end: ?usize = null,
-    },
 };
 
 const PayeeAutocomplete = struct {
@@ -99,98 +94,59 @@ pub fn render(
     const cancel = char_input != null and char_input.? == 0x03;
     if (self.mode) |*mode| switch (mode.*) {
         .edit => |*edit| {
-            if (edit.payee) |payee| switch (edit.pattern.?) {
-                .prefix => |*cursor| {
-                    window.wrap = true;
-                    const str = self.payee.unknown;
-                    if (submit) {
+            if (edit.payee) |payee|
+                if (edit.pattern) |*pattern| switch (pattern.*) {
+                    .partial => |*editor| {
+                        if (submit) {
+                            if (self.setPayee(payee)) |id| {
+                                if (self.db.createPayeeMatch(id, editor.getMatch(), editor.getValue())) {
+                                    return false;
+                                } else |err| {
+                                    self.err.shrinkRetainingCapacity(0);
+                                    self.err.writer().print(
+                                        "Error creating payee match: {}",
+                                        .{self.db.getError()},
+                                    ) catch {};
+                                    return true;
+                                }
+                            } else |err| switch (err) {
+                                error.Skip => {},
+                                else => return err,
+                            }
+                        }
+                        if (cancel) {
+                            edit.payee = null;
+                            return true;
+                        }
+                        return try editor.render(window, input);
+                    },
+                    .exact => {
+                        const str = self.payee.unknown;
                         if (self.setPayee(payee)) |id| {
-                            if (self.db.createPayeeMatch(id, .prefix, str[0 .. cursor.start + 1])) {
+                            if (try self.db.createPayeeMatch(id, .exact, str)) {
                                 return false;
                             } else |err| {
                                 self.err.shrinkRetainingCapacity(0);
-                                self.err.writer().print(
-                                    "Error creating payee match: {}",
-                                    .{self.db.getError()},
-                                ) catch {};
-                                return true;
+                                self.err.writer().writeAll("Error creating payee match.", .{});
                             }
                         } else |err| switch (err) {
-                            error.Skip => {},
-                            else => return err,
-                        }
-                    }
-                    if (cancel) {
-                        edit.payee = null;
-                        return true;
-                    }
-                    var consumed = false;
-                    if (input) |in| {
-                        if (cursor.getResultOfInput(in, str[1..])) |new_cursor| {
-                            cursor.* = new_cursor;
-                            consumed = true;
-                        }
-                    }
-                    window.setCursor(.normal);
-                    window.attrSet(attr(.highlight)) catch {};
-                    writer.writeAll(str[0 .. cursor.start + 1]) catch {};
-                    window.attrSet(0) catch {};
-                    writer.writeAll(str[cursor.start + 1 ..]) catch {};
-                    window.move(.{
-                        .column = cursor.start,
-                    });
-                    return consumed;
-                },
-                .suffix => |*cursor| {
-                    window.wrap = true;
-                    const str = self.payee.unknown;
-
-                    if (submit) {
-                        if (self.setPayee(payee)) |id| {
-                            if (self.db.createPayeeMatch(id, .suffix, str[cursor.start..])) {
-                                return false;
-                            } else |err| {
-                                self.err.shrinkRetainingCapacity(0);
-                                self.err.writer().print(
-                                    "Error creating payee match: {}",
-                                    .{self.db.getError()},
-                                ) catch {};
+                            error.Skip => {
                                 return true;
-                            }
-                        } else |err| switch (err) {
-                            error.Skip => {},
+                            },
                             else => return err,
                         }
+                    },
+                } else {
+                    if (self.setPayee(payee)) |id| {
+                        return false;
+                    } else |err| switch (err) {
+                        error.Skip => {
+                            return true;
+                        },
+                        else => return err,
                     }
-                    if (cancel) {
-                        edit.payee = null;
-                        return true;
-                    }
-                    var consumed = false;
-                    if (input) |in| {
-                        if (cursor.getResultOfInput(
-                            in,
-                            str[0 .. str.len - 1],
-                        )) |new_cursor| {
-                            cursor.* = new_cursor;
-                            consumed = true;
-                        }
-                    }
-                    window.setCursor(.normal);
-                    writer.writeAll(str[0..cursor.start]) catch {};
-                    window.attrSet(attr(.highlight)) catch {};
-                    writer.writeAll(str[cursor.start..]) catch {};
-                    window.attrSet(0) catch {};
-                    window.move(.{
-                        .column = cursor.start,
-                    });
-                    return consumed;
-                },
-                .contains => |contains| {
-                    @panic("not implemented yet");
-                },
-                else => {},
-            } else {
+                }
+            else {
                 const autocompletes = try self.getAutocompletes();
                 const perfect_match = autocompletes.len > 0 and autocompletes[0].sort_rank == 0;
 
@@ -217,37 +173,6 @@ pub fn render(
                                     .new;
 
                                 @import("../log.zig").debug("Test {}\n{}\n", .{ self.payee, edit.pattern });
-                                if (self.payee.* == .unknown) {
-                                    switch (edit.pattern.?) {
-                                        .once => {
-                                            if (self.setPayee(edit_payee)) |id| {
-                                                return false;
-                                            } else |err| switch (err) {
-                                                error.Skip => {
-                                                    return true;
-                                                },
-                                                else => return err,
-                                            }
-                                        },
-                                        .exact => {
-                                            const str = self.payee.unknown;
-                                            if (self.setPayee(edit_payee)) |id| {
-                                                if (try self.db.createPayeeMatch(id, .exact, str)) {
-                                                    return false;
-                                                } else |err| {
-                                                    self.err.shrinkRetainingCapacity(0);
-                                                    self.err.writer().writeAll("Error creating payee match.", .{});
-                                                }
-                                            } else |err| switch (err) {
-                                                error.Skip => {
-                                                    return true;
-                                                },
-                                                else => return err,
-                                            }
-                                        },
-                                        .prefix, .suffix, .contains => {},
-                                    }
-                                }
                                 edit.payee = edit_payee;
                             }
                         },
@@ -325,21 +250,19 @@ pub fn render(
     } else {
         self.text_field.reset();
         switch (self.payee.*) {
-            .unknown => {
+            .unknown => |unknown| {
                 writer.print("set (o)nce, or create an (e)xact, (p)refix, or (s)uffix pattern.", .{}) catch {};
                 const pattern: ?Pattern = if (char_input) |char| switch (char) {
-                    'o' => Pattern{ .once = {} },
+                    'o' => null,
                     'e' => Pattern{ .exact = {} },
-                    'p' => Pattern{ .prefix = .{} },
-                    's' => Pattern{ .suffix = .{} },
-                    else => null,
-                } else null;
-                if (pattern) |p| {
-                    self.mode = .{
-                        .edit = .{ .pattern = p },
-                    };
-                }
-                return pattern != null;
+                    'p' => Pattern{ .partial = PatternEditor.init(.prefix, unknown) },
+                    's' => Pattern{ .partial = PatternEditor.init(.suffix, unknown) },
+                    else => return false,
+                } else return false;
+                self.mode = .{
+                    .edit = .{ .pattern = pattern },
+                };
+                return true;
             },
             .transfer => {
                 writer.print("choose a (d)ifferent payee", .{}) catch {};
