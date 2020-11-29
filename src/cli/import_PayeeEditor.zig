@@ -7,33 +7,27 @@ const attr = @import("attributes.zig").attr;
 const Cursor = @import("Cursor.zig");
 const Database = @import("import_Database.zig");
 const PatternEditor = @import("import_PatternEditor.zig");
+const Err = @import("Err.zig");
 
-text_field: TextField,
-mode: ?union(enum) {
-    edit: struct {
-        payee: ?EditPayee = null,
-        pattern: ?Pattern = null,
-    },
-    rename: ?[]const u8,
+state: ?union(enum) {
+    edit: Edit,
+    rename: Rename,
+    pattern: Pattern,
 } = null,
-payee: *import.ImportPayee,
-payees: *import.Payees,
-accounts: *const import.Accounts,
-submitted: bool = false,
-db: Database,
-strings: std.ArrayList(u8),
+payee: import.ImportPayee,
 allocator: *std.mem.Allocator,
-payee_autocompletes: std.ArrayList(PayeeAutocomplete),
-err: std.ArrayList(u8),
+err: Err,
 
-const Pattern = union(enum) {
-    exact,
-    partial: PatternEditor,
-};
-
-const EditPayee = union(enum) {
+pub const EditPayee = union(enum) {
     existing: Database.PayeeId,
-    new,
+    new: []const u8,
+
+    pub fn deinit(self: @This(), allocator: *std.mem.Allocator) void {
+        switch (self) {
+            .new => |str| allocator.free(str),
+            else => {},
+        }
+    }
 };
 
 const PayeeAutocomplete = struct {
@@ -43,304 +37,185 @@ const PayeeAutocomplete = struct {
 };
 
 pub fn init(
-    db: Database,
-    payee: *import.ImportPayee,
-    payees: *import.Payees,
-    accounts: *const import.Accounts,
+    payee: import.ImportPayee,
     allocator: *std.mem.Allocator,
 ) @This() {
     return @This(){
-        .text_field = TextField.init(allocator),
         .payee = payee,
         .allocator = allocator,
-        .payees = payees,
-        .accounts = accounts,
-        .payee_autocompletes = std.ArrayList(PayeeAutocomplete).init(allocator),
-        .strings = std.ArrayList(u8).init(allocator),
-        .db = db,
-        .err = std.ArrayList(u8).init(allocator),
+        .err = Err.init(allocator),
     };
 }
 
 pub fn deinit(self: *@This()) void {
-    self.text_field.deinit();
-    self.payee_autocompletes.deinit();
-    self.strings.deinit();
+    if (self.state) |*state| switch (state.*) {
+        .edit => |*editor| editor.deinit(),
+        .rename => |*rename| rename.deinit(),
+        .pattern => |*editor| editor.deinit(),
+    };
     self.err.deinit();
+    self.state = null;
 }
+
+pub const Result = union(enum) {
+    submit: struct {
+        payee: EditPayee,
+        match: ?struct {
+            match: Database.Match,
+            pattern: []const u8,
+        } = null,
+    },
+    rename: []const u8,
+    input_consumed,
+};
+
+pub const Error = Edit.EditError ||
+    Pattern.PatternError || Rename.RenameError;
 
 /// Returns true if the input was consumed and should not be bubbled up
 pub fn render(
     self: *@This(),
     input_key: ?ncurses.Key,
     window: *ncurses.Box,
-) !bool {
+    db: *Database,
+) Error!?Result {
     var input = input_key;
     window.move(.{});
     const writer = window.writer();
 
-    if (self.err.items.len > 0) {
-        if (input == null) {
-            window.attrSet(attr(.err)) catch {};
-            writer.writeAll(self.err.items) catch {};
-            return false;
+    if (try self.err.render(window)) {
+        if (input != null) {
+            input = null;
+            self.err.reset();
         }
-        self.err.shrinkRetainingCapacity(0);
     }
 
-    const char_input = if (input != null and input.? == .char) input.?.char else null;
-    const control_input = if (input != null and input.? == .control) input.?.control else null;
-    const submit = char_input != null and char_input.? == '\r';
-    const cancel = char_input != null and char_input.? == 0x03;
-    if (self.mode) |*mode| switch (mode.*) {
+    if (self.state) |*state| switch (state.*) {
         .edit => |*edit| {
-            if (edit.payee) |payee|
-                if (edit.pattern) |*pattern| switch (pattern.*) {
-                    .partial => |*editor| {
-                        if (submit) {
-                            if (self.setPayee(payee)) |id| {
-                                if (self.db.createPayeeMatch(id, editor.getMatch(), editor.getValue())) {
-                                    return false;
-                                } else |err| {
-                                    self.err.shrinkRetainingCapacity(0);
-                                    self.err.writer().print(
-                                        "Error creating payee match: {}",
-                                        .{self.db.getError()},
-                                    ) catch {};
-                                    return true;
+            if (try edit.render(window, input, db)) |edit_res| {
+                switch (edit_res) {
+                    .cancel => {
+                        edit.deinit();
+                        self.state = null;
+                    },
+                    .submit => |submission| {
+                        if (submission.match) |match| {
+                            if (self.payee == .unknown) {
+                                if (match == .exact) {
+                                    self.state = null;
+                                    edit.deinit();
+                                    return Result{
+                                        .submit = .{
+                                            .payee = submission.payee,
+                                            .match = .{
+                                                .match = .exact,
+                                                .pattern = self.payee.unknown,
+                                            },
+                                        },
+                                    };
+                                } else {
+                                    self.state = .{
+                                        .pattern = Pattern.init(
+                                            submission.payee,
+                                            switch (submission.match.?) {
+                                                .prefix => .prefix,
+                                                .suffix => .suffix,
+                                                else => unreachable,
+                                            },
+                                            self.payee.unknown,
+                                        ),
+                                    };
+                                    return Result.input_consumed;
                                 }
-                            } else |err| switch (err) {
-                                error.Skip => {},
-                                else => return err,
                             }
                         }
-                        if (cancel) {
-                            edit.payee = null;
-                            return true;
-                        }
-                        return try editor.render(window, input);
+                        return Result{ .submit = .{ .payee = submission.payee } };
                     },
-                    .exact => {
-                        const str = self.payee.unknown;
-                        if (self.setPayee(payee)) |id| {
-                            if (try self.db.createPayeeMatch(id, .exact, str)) {
-                                return false;
-                            } else |err| {
-                                self.err.shrinkRetainingCapacity(0);
-                                self.err.writer().writeAll("Error creating payee match.", .{});
-                            }
-                        } else |err| switch (err) {
-                            error.Skip => {
-                                return true;
-                            },
-                            else => return err,
-                        }
-                    },
-                } else {
-                    if (self.setPayee(payee)) |id| {
-                        return false;
-                    } else |err| switch (err) {
-                        error.Skip => {
-                            return true;
-                        },
-                        else => return err,
-                    }
                 }
-            else {
-                const autocompletes = try self.getAutocompletes();
-                const perfect_match = autocompletes.len > 0 and autocompletes[0].sort_rank == 0;
-
-                if (char_input) |char| {
-                    switch (char) {
-                        0x03 => { // ^C
-                            self.mode = null;
-                            self.text_field.reset();
-                            input = null;
-                        },
-                        0x06 => { // ^F
-                            input = null;
-                            if (autocompletes.len > 0) {
-                                try self.text_field.set(autocompletes[0].name);
-                                self.text_field.cursor.start = self.text_field.value().len;
-                            }
-                        },
-                        '\r' => {
-                            input = null;
-                            if (self.text_field.value().len > 0) {
-                                const edit_payee: EditPayee = if (perfect_match)
-                                    .{ .existing = autocompletes[0].id }
-                                else
-                                    .new;
-
-                                @import("../log.zig").debug("Test {}\n{}\n", .{ self.payee, edit.pattern });
-                                edit.payee = edit_payee;
-                            }
-                        },
-                        else => {},
-                    }
-                }
-                const maybe_completion = blk: {
-                    if (perfect_match) {
-                        if (autocompletes.len > 1) break :blk autocompletes[1];
-                        break :blk null;
-                    }
-                    if (autocompletes.len > 0) break :blk autocompletes[0];
-                    break :blk null;
-                };
-
-                if (maybe_completion) |completion| {
-                    window.attrSet(attr(.dim)) catch {};
-                    writer.writeAll(completion.name) catch {};
-                    if (completion.sort_rank == 2) {
-                        window.move(.{
-                            .column = "Transfer to ".len,
-                        });
-                    } else {
-                        window.move(.{});
-                    }
-                }
-                window.attrSet(0) catch {};
-                if (perfect_match) {
-                    window.attrSet(attr(.attention)) catch {};
-                }
-                _ = try self.text_field.render(
-                    input,
-                    window,
-                    0,
-                    "(enter a payee)",
-                );
-                const position = window.getPosition();
-                if (!perfect_match and self.text_field.value().len > 0 and self.text_field.err.items.len == 0) {
-                    const action = "(create new payee)";
-
-                    window.move(.{ .line = 1 });
-                    window.attrSet(attr(.attention)) catch {};
-                    writer.writeAll(action) catch {};
-                }
-                if (position) |p| {
-                    window.move(p);
-                }
-
-                return true;
+                return Result.input_consumed;
             }
         },
-        .rename => |rename| {
-            if (rename == null) {
-                if (char_input) |char| switch (char) {
-                    0x03 => { // ^C
-                        self.mode = null;
-                        self.text_field.reset();
-                        input = null;
-                    },
-                    '\r' => {
-                        // TODO
-                        input = null;
-                    },
-                    else => {},
-                };
-                _ = try self.text_field.render(
-                    input,
-                    window,
-                    0,
-                    "(enter a new name)",
-                );
-                return true;
-            }
+        .pattern => |*pattern| {
+            if (try pattern.render(window, input)) |result| switch (result) {
+                .cancel => {
+                    pattern.deinit();
+                    self.state = null;
+                },
+                .submit => |submit| {
+                    defer pattern.deinit();
+                    defer self.state = null;
+                    return Result{
+                        .submit = .{
+                            .payee = submit.payee,
+                            .match = .{
+                                .match = submit.match,
+                                .pattern = submit.pattern,
+                            },
+                        },
+                    };
+                },
+            };
+            return Result.input_consumed;
+        },
+        .rename => |*rename| {
+            if (try rename.render(window, input)) |result| switch (result) {
+                .cancel => {
+                    rename.deinit();
+                    self.state = null;
+                },
+                .submit => |new_name| {
+                    var name_list = std.ArrayList(u8).init(self.allocator);
+                    errdefer name_list.deinit();
+                    const name_writer = name_list.writer();
+                    for (new_name) |codepoint| {
+                        var buffer: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(codepoint, &buffer) catch return error.InvalidUtf8;
+                        try name_writer.writeAll(buffer[0..len]);
+                    }
+                    return Result{ .rename = name_list.items };
+                },
+            };
         },
     } else {
-        self.text_field.reset();
-        switch (self.payee.*) {
+        const char_input = if (input != null and input.? == .char) input.?.char else null;
+        switch (self.payee) {
             .unknown => |unknown| {
                 writer.print("set (o)nce, or create an (e)xact, (p)refix, or (s)uffix pattern.", .{}) catch {};
-                const pattern: ?Pattern = if (char_input) |char| switch (char) {
+                const pattern: ?Database.Match = if (char_input) |char| switch (char) {
                     'o' => null,
-                    'e' => Pattern{ .exact = {} },
-                    'p' => Pattern{ .partial = PatternEditor.init(.prefix, unknown) },
-                    's' => Pattern{ .partial = PatternEditor.init(.suffix, unknown) },
-                    else => return false,
-                } else return false;
-                self.mode = .{
-                    .edit = .{ .pattern = pattern },
+                    'e' => Database.Match.exact,
+                    'p' => Database.Match.prefix,
+                    's' => Database.Match.suffix,
+                    else => return null,
+                } else return null;
+                self.state = .{
+                    .edit = Edit.init(self.allocator, pattern),
                 };
-                return true;
+                return Result.input_consumed;
             },
             .transfer => {
                 writer.print("choose a (d)ifferent payee", .{}) catch {};
                 var consumed = char_input != null;
                 if (char_input) |char| switch (char) {
-                    'd' => self.mode = .{ .edit = .{} },
+                    'd' => self.state = .{ .edit = Edit.init(self.allocator, null) },
                     else => consumed = false,
                 };
-                return consumed;
+                return if (consumed) Result.input_consumed else null;
             },
             .payee => {
                 var consumed = char_input != null;
                 writer.print("choose a (d)ifferent payee or (r)ename this one", .{}) catch {};
                 if (char_input) |char| switch (char) {
-                    'd' => self.mode = .{ .edit = .{} },
-                    'r' => self.mode = .{ .rename = null },
+                    'd' => self.state = .{ .edit = Edit.init(self.allocator, null) },
+                    'r' => self.state = .{ .rename = Rename.init(self.allocator) },
                     else => consumed = false,
                 };
-                return consumed;
+                return if (consumed) Result.input_consumed else null;
             },
         }
     }
 
-    return false;
-}
-
-fn getAutocompletes(self: *@This()) ![]const PayeeAutocomplete {
-    self.strings.shrinkRetainingCapacity(0);
-    const statement = self.db.payee_autocomplete;
-    self.payee_autocompletes.shrinkRetainingCapacity(0);
-    const empty_result: [0]PayeeAutocomplete = undefined;
-    statement.reset() catch {
-        self.err.shrinkRetainingCapacity(0);
-        try self.err.writer().print("Error resetting query: {}", .{statement.dbHandle().errmsg()});
-        return empty_result[0..];
-    };
-    const value_utf32 = self.text_field.value();
-
-    var start: usize = 0;
-    const stringsWriter = self.strings.writer();
-    try self.text_field.printValue(stringsWriter);
-
-    try statement.bindText(1, self.strings.items);
-
-    while (statement.step() catch {
-        self.err.shrinkRetainingCapacity(0);
-        try self.err.writer().print("Autocomplete error: {}", .{
-            statement.dbHandle().errmsg(),
-        });
-
-        return empty_result[0..];
-    }) {
-        const name = try storeString(&self.strings, statement.columnText(0));
-        const sort_rank = statement.columnInt(3);
-        switch (statement.columnType(1)) {
-            .Null => {
-                const payee_id = statement.columnInt64(2);
-                try self.payee_autocompletes.append(.{
-                    .name = name,
-                    .id = .{ .payee = payee_id },
-                    .sort_rank = sort_rank,
-                });
-            },
-            else => {
-                const transfer_id = statement.columnInt64(1);
-                try self.payee_autocompletes.append(.{
-                    .name = name,
-                    .id = .{ .transfer = transfer_id },
-                    .sort_rank = sort_rank,
-                });
-            },
-        }
-        // self.err.shrinkRetainingCapacity(0);
-        // try self.err.writer().print("Found payee: {}", .{
-        //     name,
-        // });
-    }
-    return self.payee_autocompletes.items;
+    return null;
 }
 
 fn storeString(strings: *std.ArrayList(u8), str: []const u8) ![]u8 {
@@ -357,32 +232,271 @@ fn writeCodepoint(writer: anytype, codepoint: u21) !void {
 
 const log = @import("../log.zig");
 
-fn setPayee(self: *@This(), edit_payee: EditPayee) !Database.PayeeId {
-    switch (edit_payee) {
-        .existing => |id| {
-            self.payee.* = switch (id) {
-                .payee => |payee_id| .{
-                    .payee = &(self.payees.getEntry(payee_id) orelse unreachable).value,
-                },
-                .transfer => |transfer_id| .{
-                    .transfer = &(self.accounts.getEntry(transfer_id) orelse unreachable).value,
-                },
-            };
-            return id;
-        },
-        .new => {
-            var name_buffer = std.ArrayList(u8).init(self.allocator);
-            defer name_buffer.deinit();
-            try self.text_field.printValue(name_buffer.writer());
-            const id = self.db.createPayee(name_buffer.items) catch |err| {
-                self.err.shrinkRetainingCapacity(0);
-                try self.err.writer().print("Error creating payee: {} ({})", .{ @errorName(err), self.db.getError() });
-                return error.Skip;
-            };
-            try self.payees.put(id, .{ .id = id, .name = name_buffer.toOwnedSlice() });
+const Edit = struct {
+    strings: std.ArrayList(u8),
+    err: Err,
+    text_field: TextField,
+    payee_autocompletes: std.ArrayList(PayeeAutocomplete),
+    match: ?Database.Match,
 
-            self.payee.* = .{ .payee = &(self.payees.getEntry(id) orelse unreachable).value };
-            return Database.PayeeId{ .payee = id };
+    pub const EditError = Database.Error ||
+        std.mem.Allocator.Error ||
+        error{InvalidUtf8};
+
+    const Match = enum {
+        exact, prefix, suffix
+    };
+
+    const EditResult = union(enum) {
+        submit: struct {
+            payee: EditPayee, match: ?Database.Match
         },
+        cancel,
+    };
+
+    pub fn init(allocator: *std.mem.Allocator, match: ?Database.Match) @This() {
+        return .{
+            .strings = std.ArrayList(u8).init(allocator),
+            .err = Err.init(allocator),
+            .text_field = TextField.init(allocator),
+            .match = match,
+            .payee_autocompletes = std.ArrayList(PayeeAutocomplete).init(allocator),
+        };
     }
-}
+
+    pub fn deinit(self: *@This()) void {
+        self.strings.deinit();
+        self.err.deinit();
+        self.text_field.deinit();
+    }
+
+    /// Returns true on submit or cancel
+    pub fn render(
+        self: *@This(),
+        window: *ncurses.Box,
+        key: ?ncurses.Key,
+        db: *Database,
+    ) EditError!?EditResult {
+        var input = key;
+        const writer = window.writer();
+        if (try self.err.render(window)) {
+            if (input != null) {
+                self.err.reset();
+                input = null;
+            }
+        }
+        const autocompletes = self.getAutocompletes(db) catch |err| switch (err) {
+            error.PayeeAutocompleteFailed => &[_]PayeeAutocomplete{},
+            else => |other_err| return other_err,
+        };
+        const perfect_match = autocompletes.len > 0 and autocompletes[0].sort_rank == 0;
+        if (input) |in| switch (in) {
+            .char => |char| switch (char) {
+                0x03 => { // ^C
+                    return EditResult.cancel;
+                },
+                0x06 => { // ^F
+                    input = null;
+                    if (autocompletes.len > 0) {
+                        try self.text_field.set(autocompletes[0].name);
+                        self.text_field.cursor.start = self.text_field.value().len;
+                    }
+                },
+                '\r' => {
+                    input = null;
+                    if (self.text_field.value().len > 0) {
+                        const edit_payee: EditPayee = if (perfect_match)
+                            .{ .existing = autocompletes[0].id }
+                        else
+                            .{ .new = try self.text_field.copyValue() };
+                        return EditResult{
+                            .submit = .{
+                                .payee = edit_payee,
+                                .match = self.match,
+                            },
+                        };
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        };
+
+        const maybe_completion = blk: {
+            if (perfect_match) {
+                if (autocompletes.len > 1) break :blk autocompletes[1];
+                break :blk null;
+            }
+            if (autocompletes.len > 0) break :blk autocompletes[0];
+            break :blk null;
+        };
+
+        if (maybe_completion) |completion| {
+            window.attrSet(attr(.dim)) catch {};
+            writer.writeAll(completion.name) catch {};
+            if (completion.sort_rank == 2) {
+                window.move(.{
+                    .column = "Transfer to ".len,
+                });
+            } else {
+                window.move(.{});
+            }
+        }
+        window.attrSet(0) catch {};
+        if (perfect_match) {
+            window.attrSet(attr(.attention)) catch {};
+        }
+        _ = try self.text_field.render(input, window, "(enter a payee)");
+        const position = window.getPosition();
+        if (!perfect_match and self.text_field.value().len > 0 and self.text_field.err.items.len == 0) {
+            const action = "(create new payee)";
+
+            window.move(.{ .line = 1 });
+            window.attrSet(attr(.attention)) catch {};
+            writer.writeAll(action) catch {};
+        }
+        if (position) |p| {
+            window.move(p);
+        }
+
+        return null;
+    }
+
+    fn getAutocompletes(
+        self: *@This(),
+        db: *Database,
+    ) ![]const PayeeAutocomplete {
+        self.strings.shrinkRetainingCapacity(0);
+        const statement = db.payee_autocomplete;
+        self.payee_autocompletes.shrinkRetainingCapacity(0);
+        const empty_result: [0]PayeeAutocomplete = undefined;
+        statement.reset() catch return error.PayeeAutocompleteFailed;
+        const value_utf32 = self.text_field.value();
+
+        var start: usize = 0;
+        const stringsWriter = self.strings.writer();
+        try self.text_field.printValue(stringsWriter);
+
+        statement.bindText(1, self.strings.items) catch return error.PayeeAutocompleteFailed;
+
+        while (statement.step() catch return error.PayeeAutocompleteFailed) {
+            const name = try storeString(&self.strings, statement.columnText(0));
+            const sort_rank = statement.columnInt(3);
+            switch (statement.columnType(1)) {
+                .Null => {
+                    const payee_id = statement.columnInt64(2);
+                    try self.payee_autocompletes.append(.{
+                        .name = name,
+                        .id = .{ .payee = payee_id },
+                        .sort_rank = sort_rank,
+                    });
+                },
+                else => {
+                    const transfer_id = statement.columnInt64(1);
+                    try self.payee_autocompletes.append(.{
+                        .name = name,
+                        .id = .{ .transfer = transfer_id },
+                        .sort_rank = sort_rank,
+                    });
+                },
+            }
+        }
+        return self.payee_autocompletes.items;
+    }
+};
+
+const Pattern = struct {
+    pattern_editor: PatternEditor,
+    payee: EditPayee,
+
+    pub const PatternError = error{};
+
+    const PatternResult = union(enum) {
+        cancel, submit: struct {
+            payee: EditPayee,
+            match: Database.Match,
+            pattern: []const u8,
+        }
+    };
+
+    pub fn init(
+        payee: EditPayee,
+        match: @TagType(PatternEditor.Pattern),
+        str: []const u8,
+    ) @This() {
+        return .{
+            .pattern_editor = switch (match) {
+                .prefix => PatternEditor.init(.prefix, str),
+                .suffix => PatternEditor.init(.suffix, str),
+            },
+            .payee = payee,
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {}
+
+    pub fn render(self: *@This(), window: *ncurses.Box, input: ?ncurses.Key) PatternError!?PatternResult {
+        if (input) |in| switch (in) {
+            .char => |char| switch (char) {
+                '\r' => {
+                    return PatternResult{
+                        .submit = .{
+                            .payee = self.payee,
+                            .match = self.pattern_editor.getMatch(),
+                            .pattern = self.pattern_editor.getValue(),
+                        },
+                    };
+                },
+                0x03 => {
+                    return PatternResult.cancel;
+                },
+                else => {},
+            },
+            else => {},
+        };
+        _ = try self.pattern_editor.render(window, input);
+        return null;
+    }
+};
+
+const Rename = struct {
+    text_field: TextField,
+
+    pub const RenameError = std.mem.Allocator.Error;
+
+    pub fn init(allocator: *std.mem.Allocator) @This() {
+        return .{
+            .text_field = TextField.init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.text_field.deinit();
+    }
+
+    const RenameResult = union(enum) {
+        cancel,
+        submit: []const u21,
+    };
+
+    pub fn render(self: *@This(), window: *ncurses.Box, input: ?ncurses.Key) RenameError!?RenameResult {
+        if (input) |key| switch (key) {
+            .char => |char| switch (char) {
+                0x03 => { // ^C
+                    return RenameResult.cancel;
+                },
+                '\r' => {
+                    return RenameResult{ .submit = self.text_field.value() };
+                },
+                else => {},
+            },
+            else => {},
+        };
+        _ = try self.text_field.render(
+            input,
+            window,
+            "(enter a new name)",
+        );
+        return null;
+    }
+};

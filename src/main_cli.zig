@@ -70,12 +70,8 @@ pub const Bytes = struct {
 };
 
 pub fn mainWrapped() !void {
-    var gpa = MemPerfAllocator(std.builtin.mode == .Debug){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
-        if (std.builtin.mode == .Debug) {
-            const bytes: Bytes = .{ .value = gpa.max_allocated };
-            logger.debug("Maximum memory footprint: {}", .{bytes});
-        }
         _ = gpa.deinit();
     }
     var arena = std.heap.ArenaAllocator.init(&gpa.allocator);
@@ -176,13 +172,13 @@ const Spec = union(enum) {
                 (try std.fs.cwd().openFile(file, .{})).reader()
             else
                 std.io.getStdIn().reader();
-            const prepared_import = try import_actions.prepareImport(
+            var prepared_import = try import_actions.prepareImport(
                 &db,
                 result.options._.name,
                 reader,
                 context.allocator,
             );
-            try cli.runInteractiveImport(&db, prepared_import, context.allocator);
+            try cli.runInteractiveImport(&db, &prepared_import, context.allocator);
         }
     },
     account: union(enum) {
@@ -227,19 +223,25 @@ const Spec = union(enum) {
 //  - [x] delete already existing transactions
 //  - [x] how does autofill get configured?
 //  - [x] autofill payees
-//  - [ ] autofill categories
+//  - [x] autofill categories
 //  - [ ] oh jeez that means its time to build the interactive part
-//      - [ ] display current transaction
-//      - [ ] enter/shift+enter to move between transactions
-//      - [ ] tab/shift+tab to move between columns
-//      - [ ] typing to insert new values
-//      - [ ] autocomplete
-//      - [ ] set up new autocompletes
+//      - [x] display current transaction
+//      - [x] enter/shift+enter to move between transactions
+//      - [x] tab/shift+tab to move between columns
+//      - [x] typing to insert new values
+//      - [x] autocomplete
+//      - [x] set up new autocompletes
+//      - [ ] rename categories & groups
+//      - [ ] set note
+//      - [ ] set date
+//      - [ ] set amount
 //      - [ ] split transactions
+//      - [ ] add new transaction
 //      - [ ] check totals
 //
 //  don't work on these things yet!!!
 //  - [ ] help text
+//  - [ ] altering existing autocompletes
 
 pub fn getBudgetFilePath(options: anytype, allocator: *std.mem.Allocator) ![:0]const u8 {
     const slice = options.budget orelse (std.process.getEnvVarOwned(allocator, "BUDGET_PATH") catch |err| switch (err) {

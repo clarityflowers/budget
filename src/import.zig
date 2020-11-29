@@ -76,7 +76,7 @@ const Transaction = struct {
 };
 const Account = account_actions.Account;
 
-const Category = union(enum) {
+pub const Category = union(enum) {
     budget: *const BudgetCategory,
     income,
 
@@ -301,11 +301,13 @@ pub fn getPayees(db: *const sqlite.Database, allocator: *std.mem.Allocator) !Pay
             .id = statement.columnInt64(0),
         });
     }
+    // TODO - idk if this is actually guaranteed safe?
+    map.allocator = arena.child_allocator;
     return map;
 }
 
 pub const ImportPayee = union(enum) {
-    payee: *const Payee,
+    payee: *Payee,
     transfer: *const Account,
     unknown: []const u8,
 
@@ -344,16 +346,16 @@ pub fn autofillPayees(
     payees: *const Payees,
     accounts: *const Accounts,
 ) !void {
-    const statement = db.prepare(@embedFile("payee_autofill.sql")) catch return error.DBError;
+    const statement = db.prepare(@embedFile("payee_autofill.sql")) catch return error.AutofillPayeesFailed;
 
     defer statement.finalize() catch {};
     for (transactions) |*transaction| {
         switch (transaction.payee) {
             .unknown => |payee_name| {
-                try statement.reset();
-                try statement.bindText(1, payee_name);
-                try statement.bindText(2, account_name);
-                if (try statement.step()) {
+                statement.reset() catch return error.AutofillPayeesFailed;
+                statement.bind(.{ payee_name, account_name }) catch return error.AutofillPayeesFailed;
+
+                if (statement.step() catch return error.AutofillPayeesFailed) {
                     if (statement.columnType(0) == .Null) {
                         transaction.payee = .{
                             .transfer = &(accounts.getEntry(statement.columnInt64(1)) orelse continue).value,
@@ -374,31 +376,33 @@ pub const CategoryGroup = struct {
     id: i64,
     name: []const u8,
 };
-pub fn getCategoryGroups(db: *const sqlite.Database, allocator: *std.mem.Allocator) ![]CategoryGroup {
+pub fn getCategoryGroups(db: *const sqlite.Database, allocator: *std.mem.Allocator) !CategoryGroups {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const statement = try db.prepare(
         \\SELECT id, name FROM category_groups;
     );
     defer statement.finalize() catch {};
-    var groups = std.ArrayList(CategoryGroup).init(&arena.allocator);
+    var groups = CategoryGroups.init(&arena.allocator);
     while (try statement.step()) {
-        try groups.append(.{
-            .id = statement.columnInt64(0),
+        const id = statement.columnInt64(0);
+        try groups.put(id, .{
+            .id = id,
             .name = try arena.allocator.dupe(u8, statement.columnText(1)),
         });
     }
-    return groups.toOwnedSlice();
+    return groups;
 }
 
 pub const BudgetCategory = struct {
     id: i64, group: *const CategoryGroup, name: []const u8
 };
 pub const Categories = std.AutoHashMap(i64, BudgetCategory);
+pub const CategoryGroups = std.AutoHashMap(i64, CategoryGroup);
 
 pub fn getCategories(
     db: *const sqlite.Database,
-    groups: []const CategoryGroup,
+    groups: CategoryGroups,
     allocator: *std.mem.Allocator,
 ) !Categories {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -414,18 +418,18 @@ pub fn getCategories(
     while (try statement.step()) {
         const group_id = statement.columnInt64(1);
         const id = statement.columnInt64(0);
-        const group = for (groups) |*g| {
-            if (g.id == group_id) break g;
-        } else {
+        const groupEntry = groups.getEntry(id) orelse {
             log.alert("Category {} has invalid group id {}", .{ id, group_id });
             return error.BadData;
         };
         try categories.put(id, .{
             .id = id,
-            .group = group,
+            .group = &groupEntry.value,
             .name = try arena.allocator.dupe(u8, statement.columnText(2)),
         });
     }
+    // TODO - idk if this is actually guaranteed safe?
+    categories.allocator = arena.child_allocator;
     return categories;
 }
 
@@ -434,19 +438,19 @@ pub fn autofillCategories(
     transactions: []ImportedTransaction,
     categories: *const Categories,
 ) !void {
-    const statement = try db.prepare(@embedFile("category_autofill.sql"));
+    const statement = db.prepare(@embedFile("category_autofill.sql")) catch return error.AutofillCategoriesFailed;
     defer statement.finalize() catch {};
     for (transactions) |*transaction| {
         if (transaction.category == null) {
             switch (transaction.payee) {
                 .payee => |payee| {
-                    try statement.reset();
-                    try statement.bind(.{
+                    statement.reset() catch {};
+                    statement.bind(.{
                         transaction.memo,
                         payee.id,
                         transaction.amount,
-                    });
-                    if (try statement.step()) {
+                    }) catch return error.AutofillCategoriesFailed;
+                    if (statement.step() catch return error.AutofillCategoriesFailed) {
                         if (statement.columnType(0) == .Null) {
                             transaction.category = .income;
                         } else {
@@ -465,7 +469,7 @@ pub fn autofillCategories(
 pub const PreparedImport = struct {
     accounts: Accounts,
     payees: Payees,
-    category_groups: []CategoryGroup,
+    category_groups: CategoryGroups,
     categories: Categories,
     transactions: []ImportedTransaction,
 };
@@ -486,11 +490,15 @@ pub fn prepareImport(
     log.info("Importing {} transactions", .{imported_transactions.len});
 
     var accounts = try account_actions.getAccounts(db, &arena.allocator);
+    accounts.allocator = allocator;
     var payees = try getPayees(db, &arena.allocator);
+    payees.allocator = allocator;
     try autofillPayees(db, account_name, imported_transactions, &payees, &accounts);
 
     var category_groups = try getCategoryGroups(db, &arena.allocator);
+    category_groups.allocator = allocator;
     var categories = try getCategories(db, category_groups, &arena.allocator);
+    categories.allocator = allocator;
 
     try autofillCategories(db, imported_transactions, &categories);
     return PreparedImport{

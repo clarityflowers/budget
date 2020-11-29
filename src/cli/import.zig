@@ -9,7 +9,7 @@ const attributes = @import("attributes.zig");
 
 pub fn runInteractiveImport(
     db: *const sqlite.Database,
-    data: import.PreparedImport,
+    data: *import.PreparedImport,
     allocator: *std.mem.Allocator,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -45,18 +45,29 @@ pub fn runInteractiveImport(
     // }
 
     var screen = try Screen.init(db, data, allocator);
-    var box = window.wholeBox();
 
     defer screen.deinit();
-    if (try screen.render(&box, null)) return;
+    if (try screen.render(&window.wholeBox(), null)) return;
 
     while (true) {
         const input = window.getChar() catch null;
+
+        if (input) |i| switch (i) {
+            .control => |control| switch (control) {
+                ncurses.key.resize => {
+                    window.erase() catch {};
+                    try ncurses.refresh();
+                },
+                else => {},
+            },
+            else => {},
+        };
         window.erase() catch {};
-        if (try screen.render(&box, input)) break;
+
+        if (try screen.render(&window.wholeBox(), input)) break;
         if (input != null) {
             window.erase() catch {};
-            if (try screen.render(&box, null)) break;
+            if (try screen.render(&window.wholeBox(), null)) break;
         }
         try window.refresh();
     }

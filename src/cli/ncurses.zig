@@ -249,7 +249,7 @@ pub const key = struct {
     pub const previous = c.KEY_PREVIOUS;
     pub const redo = c.KEY_REDO;
     pub const reference = c.KEY_REFERENCE;
-    pub const refresh = c.KEY_REFRESH;
+    pub const refresh_event = c.KEY_REFRESH;
     pub const replace = c.KEY_REPLACE;
     pub const resize = c.KEY_RESIZE;
     pub const restart = c.KEY_RESTART;
@@ -287,6 +287,10 @@ pub const key = struct {
     pub const sus = c.KEY_SUSPEND;
     pub const undo = c.KEY_UNDO;
 };
+
+pub fn refresh() !void {
+    try check(c.refresh());
+}
 
 pub const Window = struct {
     ptr: *c.WINDOW,
@@ -520,7 +524,7 @@ pub const Box = struct {
         return null;
     }
 
-    pub const WriteError = error{ NCursesError, InvalidUtf8 };
+    pub const WriteError = error{ NCursesWriteFailed, InvalidUtf8 };
     pub const Writer = io.Writer(*@This(), WriteError, write);
 
     pub fn writer(self: *@This()) Writer {
@@ -532,7 +536,12 @@ pub const Box = struct {
         var buffer: [buffer_size]c.cchar_t = undefined;
         var color: c_short = undefined;
         var attrs: c.attr_t = undefined;
-        try check(c.wattr_get(self.window.ptr, &attrs, &color, null));
+        check(c.wattr_get(
+            self.window.ptr,
+            &attrs,
+            &color,
+            null,
+        )) catch return error.NCursesWriteFailed;
 
         if (self.out_of_bounds) return str.len;
         var view = try std.unicode.Utf8View.init(str);
@@ -542,7 +551,13 @@ pub const Box = struct {
         while (i < buffer_size) : (i += 1) {
             if (it.nextCodepoint()) |codepoint| {
                 const codepoint_int = @intCast(c_int, codepoint);
-                try check(c.setcchar(&buffer[i], &codepoint_int, attrs, color, null));
+                check(c.setcchar(
+                    &buffer[i],
+                    &codepoint_int,
+                    attrs,
+                    color,
+                    null,
+                )) catch return error.NCursesWriteFailed;
             } else break;
         }
         try self.writeWideChars(buffer[0..i]);
@@ -559,19 +574,30 @@ pub const Box = struct {
         if (self.getPosition()) |position| {
             if (self.wrap) {
                 var str_left = chars;
-                var distance_to_edge = self.bounds.column - position.column;
+                var distance_to_edge = self.bounds.width - position.column;
                 while (distance_to_edge < str_left.len) {
-                    try check(c.wadd_wchnstr(self.window.ptr, str_left.ptr, @intCast(c_int, distance_to_edge)));
+                    check(c.wadd_wchnstr(
+                        self.window.ptr,
+                        str_left.ptr,
+                        @intCast(c_int, distance_to_edge),
+                    )) catch return error.NCursesWriteFailed;
                     str_left = str_left[distance_to_edge..];
                     distance_to_edge = self.bounds.width;
                     self.move(.{ .line = (self.gety() orelse return) + 1 });
                 }
                 if (str_left.len > 0) {
-                    try check(c.wadd_wchnstr(self.window.ptr, str_left.ptr, @intCast(c_int, str_left.len)));
+                    check(c.wadd_wchnstr(
+                        self.window.ptr,
+                        str_left.ptr,
+                        @intCast(c_int, str_left.len),
+                    )) catch return error.NCursesWriteFailed;
                     self.move(.{ .line = (self.gety() orelse return), .column = position.column + str_left.len });
                 }
             } else {
-                try check(c.wadd_wchnstr(self.window.ptr, chars.ptr, @intCast(c_int, chars.len)));
+                check(c.wadd_wchnstr(self.window.ptr, chars.ptr, @intCast(
+                    c_int,
+                    chars.len,
+                ))) catch return error.NCursesWriteFailed;
                 self.move(.{ .line = (self.gety() orelse return), .column = position.column + chars.len });
             }
         }
@@ -585,12 +611,23 @@ pub const Box = struct {
         var buffer: [32]c.cchar_t = undefined;
         var color: c_short = undefined;
         var attrs: c.attr_t = undefined;
-        try check(c.wattr_get(self.window.ptr, &attrs, &color, null));
+        check(c.wattr_get(
+            self.window.ptr,
+            &attrs,
+            &color,
+            null,
+        )) catch return WriteError.NCursesWriteFailed;
         var i: usize = 0;
         for (codepoints) |codepoint| {
             defer i += 1;
             const codepoint_int = @intCast(c_int, codepoint);
-            try check(c.setcchar(&buffer[i], &codepoint_int, attrs, color, null));
+            check(c.setcchar(
+                &buffer[i],
+                &codepoint_int,
+                attrs,
+                color,
+                null,
+            )) catch return WriteError.NCursesWriteFailed;
             if (i == 31) {
                 try self.writeWideChars(&buffer);
                 i = 0;

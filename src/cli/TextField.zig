@@ -27,10 +27,17 @@ pub fn value(self: @This()) []const u21 {
     return self.str.items;
 }
 
+/// Caller owns the allocator slice
+pub fn copyValue(self: @This()) ![]const u8 {
+    var list = std.ArrayList(u8).init(self.str.allocator);
+    try self.printValue(list.writer());
+    return list.toOwnedSlice();
+}
+
 pub fn printValue(self: @This(), writer: anytype) !void {
     var buffer: [4]u8 = undefined;
     for (self.str.items) |codepoint| {
-        const len = try std.unicode.utf8Encode(codepoint, buffer[0..]);
+        const len = std.unicode.utf8Encode(codepoint, buffer[0..]) catch return error.InvalidUtf8;
         try writer.writeAll(buffer[0..len]);
     }
 }
@@ -43,14 +50,15 @@ pub fn set(self: *@This(), new_str: []const u8) !void {
     }
 }
 
+pub const Error = std.mem.Allocator.Error;
+
 /// Returns true if the input was consumed and should not be bubbled up
 pub fn render(
     self: *@This(),
     input_key: ?ncurses.Key,
     window: *ncurses.Box,
-    top: usize,
     placeholder: []const u8,
-) !bool {
+) Error!bool {
     const x = window.getx() orelse return false;
     var input = input_key;
     const writer = window.writer();
@@ -66,7 +74,6 @@ pub fn render(
     }
 
     window.move(.{
-        .line = top,
         .column = x,
     });
     window.setCursor(.normal);
@@ -76,7 +83,6 @@ pub fn render(
         window.attrSet(0) catch {};
         self.cursor.start = 0;
         window.move(.{
-            .line = top,
             .column = x,
         });
     }
@@ -162,23 +168,19 @@ pub fn render(
 
     if (self.err.items.len > 0) {
         window.move(.{
-            .line = top,
             .column = x,
         });
         window.attrSet(attr(.err)) catch {};
         writer.writeAll(self.err.items) catch {};
         window.move(.{
-            .line = top,
             .column = x,
         });
     } else if (self.str.items.len > 0) {
         window.move(.{
-            .line = top,
             .column = x,
         });
         window.writeCodepoints(self.str.items) catch {};
         window.move(.{
-            .line = top,
             .column = x + self.cursor.start,
         });
     }

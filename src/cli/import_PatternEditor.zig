@@ -6,7 +6,7 @@ const attr = @import("attributes.zig").attr;
 pattern: Pattern,
 str: []const u8,
 
-const Pattern = union(enum) {
+pub const Pattern = union(enum) {
     prefix: Cursor, suffix: Cursor
 };
 

@@ -212,5 +212,6 @@ pub fn getAccounts(db: *const sqlite.Database, allocator: *std.mem.Allocator) !A
             .name = try arena.allocator.dupe(u8, statement.columnText(1)),
         });
     }
+    accounts.allocator = allocator;
     return accounts;
 }

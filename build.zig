@@ -9,6 +9,7 @@ pub fn build(b: *Builder) void {
     const exe = b.addExecutable("budget", "src/main_cli.zig");
     exe.setBuildMode(mode);
     exe.addIncludeDir("include");
+    exe.addIncludeDir("/usr/local/Cellar/sqlite/3.32.3/include/");
     exe.addLibPath("/usr/local/opt/ncurses/lib");
     exe.linkSystemLibrary("c");
     exe.linkSystemLibrary("ncursesw");
