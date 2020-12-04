@@ -58,6 +58,7 @@ pub fn deinit(self: *@This()) void {
 }
 
 pub const Result = union(enum) {
+    /// The payee is owned by the caller
     submit: struct {
         payee: EditPayee,
         match: ?struct {
@@ -65,14 +66,14 @@ pub const Result = union(enum) {
             pattern: []const u8,
         } = null,
     },
-    rename: []const u8,
+    /// The input should not be bubbled up
     input_consumed,
 };
 
 pub const Error = Edit.EditError ||
     Pattern.PatternError || Rename.RenameError;
 
-/// Returns true if the input was consumed and should not be bubbled up
+/// Can potentially return memory owned by the caller
 pub fn render(
     self: *@This(),
     input_key: ?ncurses.Key,
@@ -156,25 +157,6 @@ pub fn render(
                 },
             };
             return Result.input_consumed;
-        },
-        .rename => |*rename| {
-            if (try rename.render(window, input)) |result| switch (result) {
-                .cancel => {
-                    rename.deinit();
-                    self.state = null;
-                },
-                .submit => |new_name| {
-                    var name_list = std.ArrayList(u8).init(self.allocator);
-                    errdefer name_list.deinit();
-                    const name_writer = name_list.writer();
-                    for (new_name) |codepoint| {
-                        var buffer: [4]u8 = undefined;
-                        const len = std.unicode.utf8Encode(codepoint, &buffer) catch return error.InvalidUtf8;
-                        try name_writer.writeAll(buffer[0..len]);
-                    }
-                    return Result{ .rename = name_list.items };
-                },
-            };
         },
     } else {
         const char_input = if (input != null and input.? == .char) input.?.char else null;
@@ -455,48 +437,6 @@ const Pattern = struct {
             else => {},
         };
         _ = try self.pattern_editor.render(window, input);
-        return null;
-    }
-};
-
-const Rename = struct {
-    text_field: TextField,
-
-    pub const RenameError = std.mem.Allocator.Error;
-
-    pub fn init(allocator: *std.mem.Allocator) @This() {
-        return .{
-            .text_field = TextField.init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *@This()) void {
-        self.text_field.deinit();
-    }
-
-    const RenameResult = union(enum) {
-        cancel,
-        submit: []const u21,
-    };
-
-    pub fn render(self: *@This(), window: *ncurses.Box, input: ?ncurses.Key) RenameError!?RenameResult {
-        if (input) |key| switch (key) {
-            .char => |char| switch (char) {
-                0x03 => { // ^C
-                    return RenameResult.cancel;
-                },
-                '\r' => {
-                    return RenameResult{ .submit = self.text_field.value() };
-                },
-                else => {},
-            },
-            else => {},
-        };
-        _ = try self.text_field.render(
-            input,
-            window,
-            "(enter a new name)",
-        );
         return null;
     }
 };

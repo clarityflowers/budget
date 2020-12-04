@@ -5,7 +5,6 @@ handle: *const sqlite.Database,
 payee_autocomplete: sqlite.Statement,
 payee_create: sqlite.Statement,
 payee_match_create: sqlite.Statement,
-payee_rename: sqlite.Statement,
 category_autocomplete: sqlite.Statement,
 category_group_create: sqlite.Statement,
 category_create: sqlite.Statement,
@@ -19,11 +18,6 @@ pub fn init(db: *const sqlite.Database) !@This() {
         .payee_match_create = try db.prepare(
             \\INSERT INTO payee_matches(payee_id, transfer_id, match, pattern)
             \\VALUES(?, ?, ?, ?)
-        ),
-        .payee_rename = try db.prepare(
-            \\UPDATE OR FAIL payees
-            \\SET name = ?
-            \\WHERE id = ?
         ),
         .category_autocomplete = try db.prepare(@embedFile("category_completions.sql")),
         .category_group_create = try db.prepare("INSERT INTO category_groups(name) VALUES (?)"),
@@ -39,7 +33,6 @@ pub fn deinit(self: @This()) void {
     self.payee_autocomplete.finalize() catch {};
     self.payee_create.finalize() catch {};
     self.payee_match_create.finalize() catch {};
-    self.payee_rename.finalize() catch {};
     self.category_autocomplete.finalize() catch {};
     self.category_group_create.finalize() catch {};
     self.category_create.finalize() catch {};
@@ -101,13 +94,6 @@ pub fn createPayee(self: @This(), name: []const u8) !i64 {
     statement.bind(.{name}) catch return Error.CreatePayeeFailed;
     statement.finish() catch return Error.CreatePayeeFailed;
     return statement.dbHandle().lastInsertRowId();
-}
-
-pub fn renamePayee(self: @This(), id: i64, name: []const u8) !void {
-    const statement = self.payee_rename;
-    statement.reset() catch {};
-    statement.bind(.{ name, id }) catch return Error.RenamePayeeFailed;
-    statement.finish() catch return Error.RenamePayeeFailed;
 }
 
 pub fn iterateCategoryMatches(self: @This(), str: []const u8) !CategoryMatchIterator {

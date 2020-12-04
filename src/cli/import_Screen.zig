@@ -298,17 +298,6 @@ fn render_internal(
                         );
                         input = after_submit;
                     },
-                    .rename => |new_name| {
-                        switch (self.data.transactions[self.state.current].payee) {
-                            .payee => |payee| {
-                                try self.db.renamePayee(payee.id, new_name);
-                                self.allocator.free(payee.name);
-                                payee.name = new_name;
-                            },
-                            else => self.allocator.free(new_name),
-                        }
-                        input = after_submit;
-                    },
                     .input_consumed => input = null,
                 };
             },

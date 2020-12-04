@@ -30,7 +30,7 @@ FROM (
       category_groups.name || ': ' AS group_name,
       categories.name AS name
     FROM categories
-    CROSS JOIN category_groups
+    JOIN category_groups on categories.category_group_id = category_groups.id
 
     UNION
 

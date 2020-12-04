@@ -16,7 +16,6 @@ note: []const u8,
 const State = union(enum) {
     select: Select,
     pattern: Pattern,
-    rename: Rename,
 };
 
 pub fn init(
@@ -48,6 +47,7 @@ pub const Result = union(enum) {
 };
 pub const Error = Select.SelectError;
 
+/// If the result contains a submission, the selection field contains memory owned by the caller
 pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) !?Result {
     box.move(.{});
     if (self.state) |*state| {
@@ -94,20 +94,15 @@ pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) !?Result {
                 };
                 return Result.input;
             },
-            .rename => |*rename| {
-                try rename.render();
-                return null;
-            },
         }
     } else {
         const writer = box.writer();
         if (self.category.*) |category| {
-            try writer.writeAll("(s)elect a different category, or (r)ename this one.");
+            try writer.writeAll("(s)elect a different category.");
             const new_state = if (input) |key| switch (key) {
                 .control => return null,
                 .char => |char| switch (char) {
                     's' => State{ .select = Select.init(false, &self.arena.allocator, self.db) },
-                    'r' => State{ .rename = Rename.init() },
                     else => return null,
                 },
             } else return null;
@@ -476,11 +471,4 @@ const Pattern = struct {
             return null;
         }
     }
-};
-const Rename = struct {
-    pub fn init() @This() {
-        return .{};
-    }
-    pub fn deinit(self: *@This()) void {}
-    pub fn render(self: *@This()) !void {}
 };
