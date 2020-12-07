@@ -433,31 +433,77 @@ pub fn getCategories(
     return categories;
 }
 
+pub const AutofillCategoryQuery = struct {
+    statement: sqlite.Statement,
+
+    const Error = error{AutofillCategoriesFailed};
+    const Result = struct {
+        category: Category,
+        autofill_id: i64,
+    };
+
+    pub fn init(db: *const sqlite.Database) !@This() {
+        return @This(){
+            .statement = db.prepare(@embedFile("category_autofill.sql")) catch
+                return Error.AutofillCategoriesFailed,
+        };
+    }
+
+    pub fn deinit(self: @This()) void {
+        self.statement.finalize() catch {};
+    }
+
+    pub fn get(
+        self: @This(),
+        payee_id: i64,
+        memo: []const u8,
+        amount: i32,
+        categories: *const Categories,
+    ) !?Result {
+        self.statement.reset() catch {};
+        self.statement.bind(.{
+            memo,
+            payee_id,
+            amount,
+        }) catch return Error.AutofillCategoriesFailed;
+        const id = self.statement.columnInt64(2);
+        if (self.statement.step() catch return Error.AutofillCategoriesFailed) {
+            if (self.statement.columnType(0) == .Null) {
+                return Result{
+                    .category = .{ .income = {} },
+                    .autofill_id = id,
+                };
+            } else {
+                return Result{
+                    .category = .{
+                        .budget = &(categories.getEntry(self.statement.columnInt64(0)) orelse unreachable).value,
+                    },
+                    .autofill_id = id,
+                };
+            }
+        }
+        return null;
+    }
+};
+
 pub fn autofillCategories(
     db: *const sqlite.Database,
     transactions: []ImportedTransaction,
     categories: *const Categories,
 ) !void {
-    const statement = db.prepare(@embedFile("category_autofill.sql")) catch return error.AutofillCategoriesFailed;
-    defer statement.finalize() catch {};
+    var query = try AutofillCategoryQuery.init(db);
+    defer query.deinit();
     for (transactions) |*transaction| {
         if (transaction.category == null) {
             switch (transaction.payee) {
                 .payee => |payee| {
-                    statement.reset() catch {};
-                    statement.bind(.{
-                        transaction.memo,
+                    if (try query.get(
                         payee.id,
+                        transaction.memo,
                         transaction.amount,
-                    }) catch return error.AutofillCategoriesFailed;
-                    if (statement.step() catch return error.AutofillCategoriesFailed) {
-                        if (statement.columnType(0) == .Null) {
-                            transaction.category = .income;
-                        } else {
-                            transaction.category = .{
-                                .budget = &(categories.getEntry(statement.columnInt64(0)) orelse unreachable).value,
-                            };
-                        }
+                        categories,
+                    )) |result| {
+                        transaction.category = result.category;
                     }
                 },
                 else => {},

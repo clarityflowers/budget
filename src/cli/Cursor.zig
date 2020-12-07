@@ -1,7 +1,6 @@
 const ncurses = @import("ncurses.zig");
 
 start: usize = 0,
-escape: bool = false,
 
 pub fn getResultOfInput(self: @This(), input: ncurses.Key, text: anytype) ?@This() {
     assertIsText(@TypeOf(text));
@@ -23,7 +22,7 @@ pub fn getResultOfInput(self: @This(), input: ncurses.Key, text: anytype) ?@This
             },
             else => null,
         },
-        .char => |char| if (self.escape) switch (char) {
+        .escape => |escape| switch (escape) {
             'f' => blk: {
                 var start = self.start;
                 var found_text = false;
@@ -43,10 +42,10 @@ pub fn getResultOfInput(self: @This(), input: ncurses.Key, text: anytype) ?@This
                 break :blk @This(){ .start = start };
             },
             else => null,
-        } else switch (char) {
+        },
+        .char => |char| switch (char) {
             0x01 => @This(){ .start = 0 },
             0x05 => @This(){ .start = text.len },
-            0x1B => @This(){ .start = self.start, .escape = true },
             else => null,
         },
     };

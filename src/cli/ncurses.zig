@@ -5,7 +5,9 @@ const log = std.log.scoped(.ncurses);
 pub var COLORS: @TypeOf(c.COLORS) = undefined;
 
 pub const Key = union(enum) {
-    control: c_int, char: u21
+    control: c_int,
+    char: u21,
+    escape: u21,
 };
 
 fn check(val: c_int) !void {
@@ -394,6 +396,17 @@ pub const Window = struct {
                 .control = wide_char,
             };
         } else {
+            if (wide_char == 0x1B) {
+                var escaped_char: c_int = undefined;
+                const escaped_char_result = c.wget_wch(self.ptr, &escaped_char);
+                try check(escaped_char_result);
+                if (escaped_char_result == c.KEY_CODE_YES) {
+                    try check(c.unget_wch(escaped_char));
+                    return Key{ .char = @truncate(u21, std.math.absCast(wide_char)) };
+                } else {
+                    return Key{ .escape = @truncate(u21, std.math.absCast(escaped_char)) };
+                }
+            }
             return Key{ .char = @truncate(u21, std.math.absCast(wide_char)) };
         }
     }
@@ -503,6 +516,17 @@ pub const Box = struct {
             while (i < self.bounds.width) : (i += 1) {
                 try self.writeCodepoint(codepoint);
             }
+        }
+    }
+
+    pub fn clear(self: *@This()) WriteError!void {
+        const position = self.getPosition();
+        self.move(.{});
+        var i: usize = 0;
+        while (!self.out_of_bounds) {
+            try self.fillLine(' ');
+            i += 1;
+            self.move(.{ .line = i });
         }
     }
 
@@ -619,7 +643,6 @@ pub const Box = struct {
         )) catch return WriteError.NCursesWriteFailed;
         var i: usize = 0;
         for (codepoints) |codepoint| {
-            defer i += 1;
             const codepoint_int = @intCast(c_int, codepoint);
             check(c.setcchar(
                 &buffer[i],
@@ -631,6 +654,8 @@ pub const Box = struct {
             if (i == 31) {
                 try self.writeWideChars(&buffer);
                 i = 0;
+            } else {
+                i += 1;
             }
         }
         try self.writeWideChars(buffer[0..i]);

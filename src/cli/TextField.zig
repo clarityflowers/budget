@@ -108,7 +108,7 @@ pub fn render(
                 }
             },
         },
-        .char => |char| if (self.cursor.escape) switch (char) {
+        .escape => |escape| switch (escape) {
             'd' => {
                 var start = self.cursor.start;
                 const str = &self.str;
@@ -125,13 +125,14 @@ pub fn render(
                 self.cursor.start = start;
             },
             else => {
-                if (char < 256) {
-                    self.err.writer().print("Unknown escape '{c}'", .{@truncate(u8, char)}) catch {};
+                if (escape < 256) {
+                    self.err.writer().print("Unknown escape '{c}'", .{@truncate(u8, escape)}) catch {};
                 } else {
-                    self.err.writer().print("Unknown escape {x}", .{char}) catch {};
+                    self.err.writer().print("Unknown escape {x}", .{escape}) catch {};
                 }
             },
-        } else switch (char) {
+        },
+        .char => |char| switch (char) {
             0x08, 0x7F => {
                 if (self.cursor.start > 0) {
                     _ = self.str.orderedRemove(self.cursor.start - 1);

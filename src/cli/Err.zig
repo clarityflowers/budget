@@ -19,13 +19,19 @@ pub fn set(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
     try self.str.writer().print(fmt, args);
 }
 
-pub fn render(self: @This(), window: *ncurses.Box) !bool {
-    window.move(.{});
-    if (self.str.items.len > 0) {
+pub fn active(self: @This()) bool {
+    return self.str.items.len > 0;
+}
+
+pub fn render(self: *@This(), window: *ncurses.Box, input: ?ncurses.Key) !bool {
+    if (input == null) {
+        window.move(.{});
+        window.setCursor(.invisible);
         window.attrSet(attr(.err)) catch {};
-        window.writer().writeAll(self.str.items) catch {};
-        return true;
+        try window.writer().writeAll(self.str.items);
+        return false;
     } else {
+        self.reset();
         return false;
     }
 }

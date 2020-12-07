@@ -7,9 +7,10 @@ const Currency = @import("../Currency.zig");
 pub const FieldTag = enum {
     payee,
     category,
+    memo,
 };
 
-pub const Error = error{};
+pub const Error = ncurses.Box.WriteError;
 
 pub fn render(
     window: *ncurses.Box,
@@ -25,6 +26,7 @@ pub fn render(
         if (current < (number_to_display / 2)) 0 else (current - (number_to_display / 2)),
     );
     const writer = window.writer();
+    window.move(.{});
     writer.writeAll("─" ** 12) catch {};
     if (start > 0) {
         window.writeCodepoint('┼') catch {};
@@ -79,7 +81,21 @@ pub fn render(
             window.attrSet(0) catch {};
         }
         window.move(.{ .line = row + 2 });
-        writer.print(" " ** 12 ++ "│ {}", .{transaction.memo}) catch {};
+        try writer.writeAll(" " ** 12 ++ "│ ");
+        {
+            const highlight = is_current and field == .memo;
+            if (highlight) {
+                window.attrSet(attr(.highlight)) catch {};
+                if (transaction.memo.len == 0) {
+                    try writer.writeAll("(enter a memo)");
+                } else {
+                    try writer.writeAll(transaction.memo);
+                }
+            } else {
+                try writer.writeAll(transaction.memo);
+            }
+        }
+        window.attrSet(0) catch {};
         window.move(.{ .line = row + 3 });
         writer.writeAll("─" ** 12) catch {};
         if (i + start == transactions.len - 1) {

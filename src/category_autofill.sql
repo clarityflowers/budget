@@ -5,7 +5,8 @@ SELECT
     WHEN 'ends_with' THEN 2
     WHEN 'contains' THEN 3
     ELSE 0
-  END AS sort_rank
+  END AS sort_rank,
+  id
 FROM category_matches
 WHERE 
   payee_id = ?2 AND (

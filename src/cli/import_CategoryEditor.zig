@@ -9,12 +9,14 @@ const PatternEditor = @import("import_PatternEditor.zig");
 allocator: *std.mem.Allocator,
 db: *const Database,
 arena: std.heap.ArenaAllocator,
-state: ?State = null,
+state: State,
 category: *const ?import.Category,
 note: []const u8,
+existing_match_id: ?i64,
 
 const State = union(enum) {
     select: Select,
+    ask_pattern: Selection,
     pattern: Pattern,
 };
 
@@ -23,6 +25,7 @@ pub fn init(
     db: *const Database,
     category: *const ?import.Category,
     note: []const u8,
+    existing_match_id: ?i64,
 ) @This() {
     return .{
         .allocator = allocator,
@@ -30,101 +33,106 @@ pub fn init(
         .db = db,
         .category = category,
         .note = note,
+        .state = .{ .select = Select.init(allocator, db) },
+        .existing_match_id = existing_match_id,
     };
 }
 
 pub fn deinit(self: *@This()) void {
     self.arena.deinit();
+    switch (self.state) {
+        .select => |*select| select.deinit(),
+        .ask_pattern => |*selection| selection.deinit(self.allocator),
+        .pattern => |*pattern| pattern.deinit(),
+    }
 }
 
 pub const Submission = struct {
     selection: Selection,
-    pattern: ?NewPattern = null,
+    pattern: ?union(enum) {
+        new: NewPattern, update: i64
+    } = null,
 };
 pub const Result = union(enum) {
-    input,
     submit: Submission,
+    cancel,
 };
 pub const Error = Select.SelectError;
 
 /// If the result contains a submission, the selection field contains memory owned by the caller
 pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) !?Result {
     box.move(.{});
-    if (self.state) |*state| {
-        switch (state.*) {
-            .select => |*select| {
-                if (try select.render(box, input)) |result| switch (result) {
-                    .cancel => {
-                        select.deinit();
-                        self.state = null;
-                        return Result.input;
-                    },
-                    .submit => |submission| {
-                        if (submission.create_pattern) {
-                            self.state = .{
-                                .pattern = Pattern.init(
-                                    submission.selection,
-                                    self.allocator,
-                                    self.note,
-                                ),
-                            };
-                            return Result.input;
-                        }
-                        defer self.state = null;
+    switch (self.state) {
+        .select => |*select| {
+            if (try select.render(box, input)) |result| switch (result) {
+                .cancel => {
+                    return Result.cancel;
+                },
+                .submit => |submission| {
+                    self.state = .{
+                        .ask_pattern = submission,
+                    };
+                    return null;
+                },
+            };
+        },
+        .ask_pattern => |selection| {
+            if (input != null and input.? == .char) switch (input.?.char) {
+                0x03 => {
+                    selection.deinit(self.allocator);
+                    self.state = .{ .select = Select.init(self.allocator, self.db) };
+                    return null;
+                },
+                '\r' => {
+                    return Result{
+                        .submit = .{
+                            .selection = selection,
+                        },
+                    };
+                },
+                else => {},
+            };
+            if (self.category.* != null) {
+                if (self.existing_match_id) |id| {
+                    try box.writer().writeAll("");
+                    if (input != null and input.? == .char and input.?.char == 'p') {
                         return Result{
                             .submit = .{
-                                .selection = submission.selection,
+                                .selection = selection,
+                                .pattern = .{ .update = id },
                             },
                         };
-                    },
-                };
-                return Result.input;
-            },
-            .pattern => |*pattern| {
-                if (try pattern.render(box, input)) |result| switch (result) {
-                    .cancel => {
-                        pattern.deinit();
-                        self.state = .{ .select = Select.init(true, self.allocator, self.db) };
-                    },
-                    .submit => |submission| {
-                        return Result{
-                            .submit = submission,
-                        };
-                    },
-                };
-                return Result.input;
-            },
-        }
-    } else {
-        const writer = box.writer();
-        if (self.category.*) |category| {
-            try writer.writeAll("(s)elect a different category.");
-            const new_state = if (input) |key| switch (key) {
-                .control => return null,
-                .char => |char| switch (char) {
-                    's' => State{ .select = Select.init(false, &self.arena.allocator, self.db) },
-                    else => return null,
+                    }
+                    try box.writer().writeAll("(⏎)complete, or update existing (p)attern.");
+                } else {
+                    return Result{
+                        .submit = .{ .selection = selection },
+                    };
+                }
+            } else {
+                if (input != null and input.? == .char and input.?.char == 'p') {
+                    self.state = .{ .pattern = Pattern.init(selection, self.allocator, self.note) };
+                    return null;
+                }
+                try box.writer().writeAll("(⏎)complete, or create new (p)attern.");
+            }
+            return null;
+        },
+        .pattern => |*pattern| {
+            if (try pattern.render(box, input)) |result| switch (result) {
+                .cancel => {
+                    pattern.deinit();
+                    self.state = .{ .select = Select.init(self.allocator, self.db) };
                 },
-            } else return null;
-            self.state = new_state;
-            return Result.input;
-        } else {
-            try writer.writeAll("set (o)nce, or create an (a)utofill pattern.");
-            const match = if (input) |key| switch (key) {
-                .control => return null,
-                .char => |char| switch (char) {
-                    'o' => false,
-                    'a' => true,
-                    else => return null,
+                .submit => |submission| {
+                    return Result{
+                        .submit = submission,
+                    };
                 },
-            } else return null;
-            self.state = .{
-                .select = Select.init(match, &self.arena.allocator, self.db),
             };
-            return Result.input;
-        }
-        return null;
+        },
     }
+    return null;
 }
 
 const Selection = union(enum) {
@@ -153,26 +161,25 @@ const Selection = union(enum) {
     }
 };
 
+pub fn inputIsChar(input: ?ncurses.Key, char: u21) bool {
+    return input != null and input.? == char and input.?.char == char;
+}
+
 const Select = struct {
-    create_pattern: bool,
     text: TextField,
     db: *const Database,
     allocator: *std.mem.Allocator,
     strings: std.ArrayList(u8),
 
     pub const SelectResult = union(enum) {
-        submit: struct {
-            selection: Selection,
-            create_pattern: bool,
-        },
+        submit: Selection,
         cancel,
     };
     pub const SelectError = error{InvalidUtf8} ||
         ncurses.Box.WriteError || std.mem.Allocator.Error;
 
-    pub fn init(create_pattern: bool, allocator: *std.mem.Allocator, db: *const Database) @This() {
+    pub fn init(allocator: *std.mem.Allocator, db: *const Database) @This() {
         return .{
-            .create_pattern = create_pattern,
             .text = TextField.init(allocator),
             .db = db,
             .allocator = allocator,
@@ -185,8 +192,9 @@ const Select = struct {
     }
     pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) SelectError!?SelectResult {
         var input_mut = input;
-        const maybe_match = self.getMatch() catch null;
         const writer = box.writer();
+
+        const maybe_match = self.getMatch() catch null;
         const Action = union(enum) {
             new_category: struct {
                 group: i64,
@@ -198,6 +206,7 @@ const Select = struct {
             },
             set_existing: Database.CategoryId,
         };
+
         const value = self.text.value();
 
         const group_separator = &[_]u21{ ':', ' ' };
@@ -227,7 +236,6 @@ const Select = struct {
         };
 
         if (input) |key| switch (key) {
-            .control => {},
             .char => |char| switch (char) {
                 0x03 => return SelectResult.cancel,
                 0x06 => {
@@ -242,10 +250,7 @@ const Select = struct {
                         .set_existing => |id| {
                             return SelectResult{
                                 .submit = .{
-                                    .create_pattern = self.create_pattern,
-                                    .selection = .{
-                                        .existing = id,
-                                    },
+                                    .existing = id,
                                 },
                             };
                         },
@@ -259,12 +264,9 @@ const Select = struct {
                             }
                             return SelectResult{
                                 .submit = .{
-                                    .create_pattern = self.create_pattern,
-                                    .selection = .{
-                                        .new = .{
-                                            .group = .{ .existing = new.group },
-                                            .name = name_list.toOwnedSlice(),
-                                        },
+                                    .new = .{
+                                        .group = .{ .existing = new.group },
+                                        .name = name_list.toOwnedSlice(),
                                     },
                                 },
                             };
@@ -286,21 +288,19 @@ const Select = struct {
                             }
                             return SelectResult{
                                 .submit = .{
-                                    .create_pattern = self.create_pattern,
-                                    .selection = .{
-                                        .new = .{
-                                            .group = .{ .new = group_list.toOwnedSlice() },
-                                            .name = name_list.toOwnedSlice(),
-                                        },
+                                    .new = .{
+                                        .group = .{ .new = group_list.toOwnedSlice() },
+                                        .name = name_list.toOwnedSlice(),
                                     },
                                 },
                             };
                         },
                     };
-                    input_mut = null;
+                    return null;
                 },
                 else => {},
             },
+            else => {},
         };
         if (maybe_match) |match| {
             // Draw completion
@@ -418,10 +418,12 @@ const Pattern = struct {
                             .submit = .{
                                 .selection = self.selection,
                                 .pattern = .{
-                                    .use_amount = use_amount,
-                                    .match_note = .{
-                                        .match = editor.getMatch(),
-                                        .value = editor.getValue(),
+                                    .new = .{
+                                        .use_amount = use_amount,
+                                        .match_note = .{
+                                            .match = editor.getMatch(),
+                                            .value = editor.getValue(),
+                                        },
                                     },
                                 },
                             },
@@ -439,10 +441,12 @@ const Pattern = struct {
                     .submit = .{
                         .selection = self.selection,
                         .pattern = .{
-                            .use_amount = use_amount,
-                            .match_note = .{
-                                .match = .exact,
-                                .value = self.note,
+                            .new = .{
+                                .use_amount = use_amount,
+                                .match_note = .{
+                                    .match = .exact,
+                                    .value = self.note,
+                                },
                             },
                         },
                     },
@@ -453,7 +457,9 @@ const Pattern = struct {
                     .submit = .{
                         .selection = self.selection,
                         .pattern = .{
-                            .use_amount = use_amount,
+                            .new = .{
+                                .use_amount = use_amount,
+                            },
                         },
                     },
                 },

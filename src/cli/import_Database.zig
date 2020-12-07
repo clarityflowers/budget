@@ -9,6 +9,7 @@ category_autocomplete: sqlite.Statement,
 category_group_create: sqlite.Statement,
 category_create: sqlite.Statement,
 category_match_create: sqlite.Statement,
+category_autofill: import.AutofillCategoryQuery,
 
 pub fn init(db: *const sqlite.Database) !@This() {
     return @This(){
@@ -26,6 +27,7 @@ pub fn init(db: *const sqlite.Database) !@This() {
             \\INSERT INTO category_matches(payee_id, category_id, amount, note, note_pattern)
             \\VALUES (?, ?, ?, ?, ?)
         ),
+        .category_autofill = try import.AutofillCategoryQuery.init(db),
     };
 }
 
@@ -37,6 +39,7 @@ pub fn deinit(self: @This()) void {
     self.category_group_create.finalize() catch {};
     self.category_create.finalize() catch {};
     self.category_match_create.finalize() catch {};
+    self.category_autofill.deinit();
 }
 
 pub const PayeeId = union(enum) {
