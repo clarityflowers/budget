@@ -5,6 +5,7 @@ const import = @import("../import.zig");
 const Currency = @import("../Currency.zig");
 
 pub const FieldTag = enum {
+    date,
     payee,
     category,
     memo,
@@ -37,29 +38,29 @@ pub fn render(
 
     for (transactions[start..std.math.min(transactions.len, start + number_to_display + 1)]) |transaction, i| {
         const row = i * 4 + 1;
-        window.move(.{ .line = row });
-        writer.print("{Day, Mon DD} │ ", .{transaction.date}) catch {};
         const is_current = i + start == current;
+        window.move(.{ .line = row });
+        {
+            const highlight = is_current and field == .date;
+            window.attrSet(if (highlight) attr(.highlight) else 0) catch {};
+            try writer.print("{Day, Mon DD}", .{transaction.date});
+            window.attrSet(0) catch {};
+            try writer.writeAll(" │ ");
+        }
         {
             const highlight = is_current and field == .payee;
 
             if (transaction.payee == .unknown) {
-                if (highlight) {
-                    window.attrSet(attr(.attention_highlight)) catch {};
-                } else {
-                    window.attrSet(attr(.attention)) catch {};
-                }
+                window.attrSet(if (highlight) attr(.attention_highlight) else attr(.attention)) catch {};
                 writer.print("({})", .{transaction.payee}) catch {};
             } else {
-                if (highlight) {
-                    window.attrSet(attr(.highlight)) catch {};
-                }
+                window.attrSet(if (highlight) attr(.highlight) else 0) catch {};
                 writer.print("{}", .{transaction.payee}) catch {};
             }
-            window.attrSet(0) catch {};
         }
         window.move(.{ .line = row + 1 });
         const amount = Currency{ .amount = transaction.amount };
+        window.attrSet(0) catch {};
         writer.print("{: >11} │ ", .{amount}) catch {};
         {
             const highlight = is_current and field == .category;

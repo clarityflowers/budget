@@ -402,7 +402,7 @@ pub const CategoryGroups = std.AutoHashMap(i64, CategoryGroup);
 
 pub fn getCategories(
     db: *const sqlite.Database,
-    groups: CategoryGroups,
+    groups: *const CategoryGroups,
     allocator: *std.mem.Allocator,
 ) !Categories {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -418,8 +418,8 @@ pub fn getCategories(
     while (try statement.step()) {
         const group_id = statement.columnInt64(1);
         const id = statement.columnInt64(0);
-        const groupEntry = groups.getEntry(id) orelse {
-            log.alert("Category {} has invalid group id {}", .{ id, group_id });
+        const groupEntry = groups.getEntry(group_id) orelse {
+            log.alert("Category {} ({}) has invalid group id {}", .{ statement.columnText(2), id, group_id });
             return error.BadData;
         };
         try categories.put(id, .{
@@ -542,8 +542,9 @@ pub fn prepareImport(
     try autofillPayees(db, account_name, imported_transactions, &payees, &accounts);
 
     var category_groups = try getCategoryGroups(db, &arena.allocator);
+
     category_groups.allocator = allocator;
-    var categories = try getCategories(db, category_groups, &arena.allocator);
+    var categories = try getCategories(db, &category_groups, &arena.allocator);
     categories.allocator = allocator;
 
     try autofillCategories(db, imported_transactions, &categories);

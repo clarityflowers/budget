@@ -22,6 +22,7 @@ initialized: bool = false,
 err: Err,
 
 const Field = union(list.FieldTag) {
+    date: ?DateEditor,
     payee: ?PayeeEditor,
     category: ?CategoryEditor,
     memo: ?MemoEditor,
@@ -62,6 +63,7 @@ pub fn deinit(self: *@This()) void {
 pub fn isMissing(self: @This(), state: ScreenState) bool {
     const transaction = self.data.transactions[state.current];
     return switch (state.field) {
+        .date => false,
         .payee => transaction.payee == .unknown,
         .category => transaction.payee == .payee and transaction.category == null,
         .memo => false,
@@ -86,6 +88,7 @@ pub fn moveUp(self: @This(), state: ScreenState) ScreenState {
         result.current -= 1;
     }
     switch (result.field) {
+        .date => result.field = .{ .date = null },
         .payee => result.field = .{ .payee = null },
         .category => {
             if (self.data.transactions[result.current].payee == .payee) {
@@ -103,6 +106,7 @@ pub fn moveDown(self: @This(), state: ScreenState) ScreenState {
     var result = state;
     result.current = (result.current + 1) % self.data.transactions.len;
     switch (result.field) {
+        .date => result.field = .{ .date = null },
         .payee => result.field = .{ .payee = null },
         .category => {
             if (self.data.transactions[result.current].payee == .payee) {
@@ -119,6 +123,9 @@ pub fn moveDown(self: @This(), state: ScreenState) ScreenState {
 pub fn next(self: @This(), state: ScreenState) ScreenState {
     var result = state;
     switch (result.field) {
+        .date => {
+            result.field = .{ .payee = null };
+        },
         .payee => {
             if (self.data.transactions[result.current].payee == .payee) {
                 result.field = .{ .category = null };
@@ -131,7 +138,7 @@ pub fn next(self: @This(), state: ScreenState) ScreenState {
         },
         .memo => {
             result = self.moveDown(result);
-            result.field = .{ .payee = null };
+            result.field = .{ .date = null };
         },
     }
     return result;
@@ -139,9 +146,12 @@ pub fn next(self: @This(), state: ScreenState) ScreenState {
 pub fn prev(self: @This(), state: ScreenState) ScreenState {
     var result = state;
     switch (result.field) {
-        .payee => {
+        .date => {
             result = self.moveUp(result);
             result.field = .{ .memo = null };
+        },
+        .payee => {
+            result.field = .{ .date = null };
         },
         .category => {
             result.field = .{ .payee = null };
@@ -269,17 +279,41 @@ fn render_internal(
     var lower_box = box.box(.{ .line = divider_line + 1, .height = 3 });
     lower_box.move(.{});
 
-    // if (self.err.active()) {
-    //     if (try self.err.render(&lower_box, input)) {
-    //         input = null;
-    //     } else return false;
-    // }
+    if (self.err.active()) {
+        if (try self.err.render(&lower_box, input)) {
+            input = null;
+        } else return false;
+    }
     if (self.attempting_interrupt) {
         lower_box.move(.{});
         lower_box.writer().print("Press ^C again to quit.", .{}) catch {};
     } else {
         const transaction = &self.data.transactions[self.state.current];
         switch (self.state.field) {
+            .date => |*maybe_editor| {
+                if (maybe_editor.*) |*date_editor| {
+                    if (try date_editor.render(&lower_box, input)) |result| switch (result) {
+                        .cancel => {
+                            date_editor.deinit();
+                            maybe_editor.* = null;
+                            input = null;
+                        },
+                        .submit => |date| {
+                            transaction.date = date;
+                            input = after_submit;
+                        },
+                    } else input = null;
+                } else {
+                    try lower_box.writer().writeAll("(s)elect a date");
+                    if (char_input) |char| switch (char) {
+                        's' => {
+                            var editor = DateEditor.init(transaction.date);
+                            maybe_editor.* = editor;
+                        },
+                        else => {},
+                    };
+                }
+            },
             .payee => |*maybe_editor| {
                 if (maybe_editor.*) |*payee_editor| {
                     const result = try payee_editor.render(input, &lower_box, &self.db);
@@ -288,7 +322,6 @@ fn render_internal(
                             payee_editor.deinit();
                             maybe_editor.* = null;
                             input = null;
-                            return self.render(box, null);
                         },
                         .submit => |submission| {
                             defer submission.payee.deinit(self.allocator);
@@ -505,6 +538,7 @@ fn render_internal(
     }
     if (new_state) |ns| {
         switch (self.state.field) {
+            .date => |*date| if (date.*) |*d| d.deinit(),
             .payee => |*payee| if (payee.*) |*p| p.deinit(),
             .category => |*category| if (category.*) |*c| c.deinit(),
             .memo => |*memo| if (memo.*) |*m| m.deinit(),
