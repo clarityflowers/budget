@@ -167,7 +167,7 @@ pub fn prev(self: @This(), state: ScreenState) ScreenState {
     return result;
 }
 
-/// Returns true when done
+/// Returns true if the import is completed and false if it is cancelled.
 pub fn render(
     self: *@This(),
     box: *ncurses.Box,
