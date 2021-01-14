@@ -175,48 +175,20 @@ pub fn render(
 ) !bool {
     return self.render_internal(box, input_key) catch |err| {
         switch (err) {
-            error.OutOfMemory => self.err.set(
-                "Your computer is running low on memory."[0..],
-                .{},
-            ) catch {},
-            error.CreatePayeeFailed => self.err.set(
-                "Failed creating payee: {}",
-                .{self.db.getError()},
-            ) catch {},
-            error.CreatePayeeMatchFailed, error.CreateCategoryMatchFailed => self.err.set(
-                "Failed creating match: {}",
-                .{self.db.getError()},
-            ) catch {},
-            error.UpdateMatchFailed => self.err.set(
-                "Failed updating match: {}",
-                .{self.db.getError()},
-            ) catch {},
-            error.RenamePayeeFailed => self.err.set(
-                "Failed renaming payee: {}",
-                .{self.db.getError()},
-            ) catch {},
-            error.CreateCategoryGroupFailed => self.err.set(
-                "Failed creating category group: {}",
-                .{self.db.getError()},
-            ) catch {},
-            error.CreateCategoryFailed => self.err.set(
-                "Failed creating category: {}",
-                .{self.db.getError()},
-            ) catch {},
+            error.CreatePayeeFailed,
+            error.CreatePayeeMatchFailed,
+            error.UpdateMatchFailed,
+            error.RenamePayeeFailed,
+            error.CreateCategoryGroupFailed,
+            error.CreateCategoryMatchFailed,
+            error.CreateCategoryFailed,
             error.AutofillPayeesFailed,
             error.AutofillCategoriesFailed,
-            => self.err.set(
-                "Failed autofilling: {}",
-                .{self.db.getError()},
-            ) catch {},
-            error.InvalidUtf8 => self.err.set(
-                "Encountered utf8 string",
-                .{},
-            ) catch {},
-            error.NCursesWriteFailed => self.err.set(
-                "Failed to write to the terminal.",
-                .{},
-            ) catch {},
+            => self.err.set("Err: {}. {}", .{ @errorName(err), self.db.getError() }) catch {},
+            error.OutOfMemory,
+            error.InvalidUtf8,
+            error.NCursesWriteFailed,
+            => self.err.set("Err: {}", .{@errorName(err)}) catch {},
             error.Interrupted => |other_err| return other_err,
         }
         if (std.builtin.mode == .Debug) {
