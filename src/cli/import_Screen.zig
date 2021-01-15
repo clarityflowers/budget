@@ -11,6 +11,7 @@ const attr = @import("attributes.zig").attr;
 const Database = @import("import_Database.zig");
 const list = @import("import_list.zig");
 const Err = @import("Err.zig");
+const unicode = @import("unicode.zig");
 
 db: Database,
 allocator: *std.mem.Allocator,
@@ -207,8 +208,7 @@ const Error = error{
     AutofillCategoriesFailed,
     UpdateMatchFailed,
 } || std.mem.Allocator.Error ||
-    PayeeEditor.Error ||
-    CategoryEditor.Error;
+    PayeeEditor.Error;
 
 fn render_internal(
     self: *@This(),
@@ -343,7 +343,6 @@ fn render_internal(
                             input = null;
                         },
                         .submit => |submission| {
-                            defer submission.selection.deinit(self.allocator);
                             const id = switch (submission.selection) {
                                 .existing => |id| blk: {
                                     switch (id) {
@@ -365,20 +364,24 @@ fn render_internal(
                                             return false;
                                         }).value,
                                         .new => |name| blk: {
-                                            const id = try self.db.createCategoryGroup(name);
+                                            const name_utf8 = try unicode.encodeUtf8Alloc(name, self.allocator);
+                                            errdefer self.allocator.free(name_utf8);
+                                            const id = try self.db.createCategoryGroup(name_utf8);
                                             const res = try self.data.category_groups.getOrPut(id);
                                             std.debug.assert(!res.found_existing);
-                                            res.entry.value = .{ .id = id, .name = try self.allocator.dupe(u8, name) };
+                                            res.entry.value = .{ .id = id, .name = name_utf8 };
                                             break :blk &res.entry.value;
                                         },
                                     };
-                                    const id = try self.db.createCategory(group.id, new.name);
+                                    const name_utf8 = try unicode.encodeUtf8Alloc(new.name, self.allocator);
+                                    errdefer self.allocator.free(name_utf8);
+                                    const id = try self.db.createCategory(group.id, name_utf8);
                                     const res = try self.data.categories.getOrPut(id);
                                     std.debug.assert(!res.found_existing);
                                     res.entry.value = .{
                                         .id = id,
                                         .group = group,
-                                        .name = try self.allocator.dupe(u8, new.name),
+                                        .name = name_utf8,
                                     };
                                     transaction.category = .{
                                         .budget = &res.entry.value,
@@ -419,7 +422,6 @@ fn render_internal(
                             self.allocator,
                             &self.db,
                             &transaction.category,
-                            transaction.memo,
                             existing_match_id,
                         );
                         maybe_editor.* = editor;
