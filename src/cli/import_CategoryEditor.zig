@@ -92,13 +92,11 @@ pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) !?Result {
                 },
                 else => {},
             };
-            if (self.category.* != null) {
-                if (self.existing_match_id) |id| {
-                    try box.writer().writeAll("(⏎)complete, or update existing (p)attern.");
-                    return null;
-                }
+            if (self.existing_match_id) |id| {
+                try box.writer().writeAll("(⏎)complete, or update existing (p)attern.");
+            } else {
+                try box.writer().writeAll("(⏎)complete, or create new (p)attern.");
             }
-            try box.writer().writeAll("(⏎)complete, or create new (p)attern.");
 
             return null;
         },
