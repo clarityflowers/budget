@@ -474,6 +474,22 @@ fn render_internal(
                         attempting_interrupt = true;
                     }
                 },
+                '`' => {
+                    ncurses.end();
+                    defer ncurses.refresh() catch {};
+
+                    log.printLogfile();
+
+                    const stdout = std.io.getStdOut().writer();
+                    stdout.writeAll("\n[Press return to resume]") catch {};
+                    // TODO - this isn't portable. dunno if I care.
+                    // 1T - scroll up 1 line
+                    // K - delete to end of line
+                    defer stdout.writeAll("\x1B[2T" ++ "\x1B[K") catch {};
+
+                    var buffer: [1]u8 = undefined;
+                    _ = std.io.getStdIn().reader().read(&buffer) catch {};
+                },
                 '\r' => {
                     new_state = self.getNextMissing();
                 },

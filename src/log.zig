@@ -57,7 +57,7 @@ pub fn openLogfile() !void {
     logfile = try std.fs.cwd().createFile(logfile_path, .{ .read = true });
 }
 
-pub fn closeLogfile() void {
+pub fn printLogfile() void {
     if (logfile) |file| {
         const stderr = std.io.getStdErr().writer();
         file.seekTo(0) catch {};
@@ -69,6 +69,13 @@ pub fn closeLogfile() void {
             stderr.writeAll(buffer[0..len]) catch {};
             if (len < buffer_size) break;
         }
+        file.setEndPos(0) catch {};
+    }
+}
+
+pub fn closeLogfile() void {
+    printLogfile();
+    if (logfile) |file| {
         file.close();
         std.fs.cwd().deleteFile(logfile_path) catch {};
     }
