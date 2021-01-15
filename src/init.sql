@@ -34,15 +34,15 @@ CREATE TABLE categories(
 CREATE UNIQUE INDEX categories_unique on categories(category_group_id, name);
 CREATE TABLE category_matches(
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  payee_id            INTEGER,
+  payee_id            INTEGER NOT NULL,
   category_id         INTEGER,
-  amount              INTEGER,
-  note                TEXT,
-  note_pattern        TEXT,
+  amount              INTEGER DEFAULT NULL,
+  note                TEXT    DEFAULT NULL,
+  note_pattern        TEXT    DEFAULT NULL,
   FOREIGN KEY(payee_id)       REFERENCES payees(id),
   FOREIGN KEY(category_id)    REFERENCES categories(id)
 );
-CREATE UNIQUE INDEX category_matches_unique on category_matches(payee_id, amount, note, note_pattern);
+CREATE UNIQUE INDEX category_matches_unique on category_matches(payee_id, ifnull(amount, 0), ifnull(note, ''), ifnull(note_pattern, ''));
 CREATE TABLE import_rules(
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id      INTEGER NOT NULL    UNIQUE,

@@ -17,7 +17,6 @@ existing_match_id: ?i64,
 const State = union(enum) {
     select: Select,
     ask_pattern: Selection,
-    pattern: Pattern,
 };
 
 pub fn init(
@@ -43,15 +42,12 @@ pub fn deinit(self: *@This()) void {
     switch (self.state) {
         .select => |*select| select.deinit(),
         .ask_pattern => |*selection| selection.deinit(self.allocator),
-        .pattern => |*pattern| pattern.deinit(),
     }
 }
 
 pub const Submission = struct {
     selection: Selection,
-    pattern: ?union(enum) {
-        new: NewPattern, update: i64
-    } = null,
+    pattern: bool = false,
 };
 pub const Result = union(enum) {
     submit: Submission,
@@ -92,44 +88,23 @@ pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) !?Result {
                 },
                 else => {},
             };
+            if (input != null and input.? == .char and input.?.char == 'p') {
+                return Result{
+                    .submit = .{
+                        .selection = selection,
+                        .pattern = true,
+                    },
+                };
+            }
             if (self.category.* != null) {
                 if (self.existing_match_id) |id| {
-                    try box.writer().writeAll("");
-                    if (input != null and input.? == .char and input.?.char == 'p') {
-                        return Result{
-                            .submit = .{
-                                .selection = selection,
-                                .pattern = .{ .update = id },
-                            },
-                        };
-                    }
                     try box.writer().writeAll("(⏎)complete, or update existing (p)attern.");
-                } else {
-                    return Result{
-                        .submit = .{ .selection = selection },
-                    };
-                }
-            } else {
-                if (input != null and input.? == .char and input.?.char == 'p') {
-                    self.state = .{ .pattern = Pattern.init(selection, self.allocator, self.note) };
                     return null;
                 }
-                try box.writer().writeAll("(⏎)complete, or create new (p)attern.");
             }
+            try box.writer().writeAll("(⏎)complete, or create new (p)attern.");
+
             return null;
-        },
-        .pattern => |*pattern| {
-            if (try pattern.render(box, input)) |result| switch (result) {
-                .cancel => {
-                    pattern.deinit();
-                    self.state = .{ .select = Select.init(self.allocator, self.db) };
-                },
-                .submit => |submission| {
-                    return Result{
-                        .submit = submission,
-                    };
-                },
-            };
         },
     }
     return null;
@@ -195,6 +170,7 @@ const Select = struct {
         const writer = box.writer();
 
         const maybe_match = self.getMatch() catch null;
+
         const Action = union(enum) {
             new_category: struct {
                 group: i64,
@@ -333,7 +309,7 @@ const Select = struct {
         } else {
             box.attrSet(0) catch {};
             box.move(.{});
-            _ = try self.text.render(input_mut, box, "Enter a category");
+            _ = try self.text.render(input_mut, box, "Group: Category");
         }
         if (maybe_action) |action| {
             const position = box.getPosition();
@@ -346,6 +322,7 @@ const Select = struct {
             }
             if (position) |pos| box.move(pos) else box.out_of_bounds = true;
         }
+
         return null;
     }
 
@@ -371,110 +348,5 @@ const Select = struct {
             return result;
         }
         return null;
-    }
-};
-
-const NewPattern = struct {
-    use_amount: bool,
-    match_note: ?Database.CategoryMatchNote = null,
-};
-const Pattern = struct {
-    selection: Selection,
-    allocator: *std.mem.Allocator,
-    use_amount: ?bool = null,
-    match_note: ?PatternEditor = null,
-    note: []const u8,
-
-    pub const PatternResult = union(enum) {
-        cancel,
-        submit: Submission,
-    };
-    pub const PatternError = ncurses.Box.WriteError;
-
-    pub fn init(selection: Selection, allocator: *std.mem.Allocator, note: []const u8) @This() {
-        return .{
-            .selection = selection,
-            .allocator = allocator,
-            .note = note,
-        };
-    }
-    pub fn deinit(self: *@This()) void {
-        self.selection.deinit(self.allocator);
-    }
-    pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) PatternError!?PatternResult {
-        const writer = box.writer();
-        box.wrap = true;
-        const input_char = if (input != null and input.? == .char) input.?.char else null;
-
-        if (self.use_amount) |use_amount| {
-            if (self.match_note) |*editor| {
-                if (input_char) |char| switch (char) {
-                    0x03 => {
-                        self.match_note = null;
-                        return null;
-                    },
-                    '\r' => {
-                        return PatternResult{
-                            .submit = .{
-                                .selection = self.selection,
-                                .pattern = .{
-                                    .new = .{
-                                        .use_amount = use_amount,
-                                        .match_note = .{
-                                            .match = editor.getMatch(),
-                                            .value = editor.getValue(),
-                                        },
-                                    },
-                                },
-                            },
-                        };
-                    },
-                    else => {},
-                };
-                _ = try editor.render(box, input);
-                return null;
-            }
-            try writer.writeAll("Add a match on the note with an (e)xact, (p)refix, or (s)uffix pattern, or (⏎)continue.");
-            if (input_char) |char| switch (char) {
-                0x03 => self.use_amount = null,
-                'e' => return PatternResult{
-                    .submit = .{
-                        .selection = self.selection,
-                        .pattern = .{
-                            .new = .{
-                                .use_amount = use_amount,
-                                .match_note = .{
-                                    .match = .exact,
-                                    .value = self.note,
-                                },
-                            },
-                        },
-                    },
-                },
-                'p' => self.match_note = PatternEditor.init(.prefix, self.note),
-                's' => self.match_note = PatternEditor.init(.suffix, self.note),
-                '\r' => return PatternResult{
-                    .submit = .{
-                        .selection = self.selection,
-                        .pattern = .{
-                            .new = .{
-                                .use_amount = use_amount,
-                            },
-                        },
-                    },
-                },
-                else => {},
-            };
-            return null;
-        } else {
-            try writer.writeAll("Autofill by amount? (y)es (⏎)no");
-            if (input_char) |char| switch (char) {
-                0x03 => return PatternResult.cancel,
-                'y' => self.use_amount = true,
-                '\r' => self.use_amount = false,
-                else => {},
-            };
-            return null;
-        }
     }
 };

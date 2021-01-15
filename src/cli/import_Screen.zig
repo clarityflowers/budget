@@ -167,7 +167,7 @@ pub fn prev(self: @This(), state: ScreenState) ScreenState {
     return result;
 }
 
-/// Returns true if the import is completed and false if it is cancelled.
+/// Returns true if the import is completed and falkse
 pub fn render(
     self: *@This(),
     box: *ncurses.Box,
@@ -386,31 +386,22 @@ fn render_internal(
                                     break :new_blk Database.CategoryId{ .budget = id };
                                 },
                             };
-                            if (submission.pattern) |pattern| switch (pattern) {
-                                .new => |new_pattern| {
-                                    try self.db.createCategoryMatch(
-                                        transaction.payee.payee.id,
-                                        id,
-                                        if (new_pattern.use_amount) transaction.amount else null,
-                                        new_pattern.match_note,
-                                    );
-                                    try import.autofillCategories(
-                                        self.db.handle,
-                                        self.data.transactions,
-                                        &self.data.categories,
-                                    );
-                                },
-                                .update => |existing_id| {
-                                    const category_id = switch (id) {
-                                        .income => @as(?i64, null),
-                                        .budget => |budget_id| @as(?i64, budget_id),
-                                    };
-                                    self.db.handle.execBind("UPDATE category_matches SET category_id = ? WHERE id = ?", .{
-                                        category_id,
-                                        existing_id,
-                                    }) catch return Error.UpdateMatchFailed;
-                                },
-                            };
+                            if (submission.pattern) {
+                                const category_id = switch (id) {
+                                    .income => @as(?i64, null),
+                                    .budget => |budget_id| @as(?i64, budget_id),
+                                };
+                                self.db.handle.execBind("INSERT OR REPLACE INTO category_matches(category_id, payee_id) VALUES (?, ?)", .{
+                                    category_id,
+                                    transaction.payee.payee.id,
+                                }) catch return Error.CreateCategoryMatchFailed;
+
+                                try import.autofillCategories(
+                                    self.db.handle,
+                                    self.data.transactions,
+                                    &self.data.categories,
+                                );
+                            }
                             input = after_submit;
                         },
                     } else return false;
