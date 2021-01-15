@@ -22,6 +22,8 @@ attempting_interrupt: bool = false,
 initialized: bool = false,
 err: Err,
 
+seen_instructions: bool = false,
+
 const Field = union(list.FieldTag) {
     date: ?DateEditor,
     payee: ?PayeeEditor,
@@ -256,11 +258,23 @@ fn render_internal(
             input = null;
         } else return false;
     }
+
+    const select = char_input != null and char_input.? == ' ';
+
     if (self.attempting_interrupt) {
         lower_box.move(.{});
         lower_box.writer().print("Press ^C again to quit.", .{}) catch {};
     } else {
+        const writer = lower_box.writer();
+        if (!self.seen_instructions) {
+            if (input != null) {
+                self.seen_instructions = true;
+            } else {
+                try writer.writeAll("( )edit (⇥/⇧⇥)next/prev value (↓/↑)next/prev item (⏎)next unfilled");
+            }
+        }
         const transaction = &self.data.transactions[self.state.current];
+
         switch (self.state.field) {
             .date => |*maybe_editor| {
                 if (maybe_editor.*) |*date_editor| {
@@ -275,15 +289,9 @@ fn render_internal(
                             input = after_submit;
                         },
                     } else input = null;
-                } else {
-                    try lower_box.writer().writeAll("(s)elect a date");
-                    if (char_input) |char| switch (char) {
-                        's' => {
-                            var editor = DateEditor.init(transaction.date);
-                            maybe_editor.* = editor;
-                        },
-                        else => {},
-                    };
+                } else if (select) {
+                    var editor = DateEditor.init(transaction.date);
+                    maybe_editor.* = editor;
                 }
             },
             .payee => |*maybe_editor| {
@@ -323,15 +331,9 @@ fn render_internal(
                             input = after_submit;
                         },
                     } else input = null;
-                } else {
-                    try lower_box.writer().writeAll("(s)elect a payee");
-                    if (char_input) |char| switch (char) {
-                        's' => {
-                            var editor = PayeeEditor.init(transaction.payee, self.allocator);
-                            maybe_editor.* = editor;
-                        },
-                        else => {},
-                    };
+                } else if (select) {
+                    var editor = PayeeEditor.init(transaction.payee, self.allocator);
+                    maybe_editor.* = editor;
                 }
             },
             .category => |*maybe_editor| {
@@ -408,26 +410,21 @@ fn render_internal(
                             input = after_submit;
                         },
                     } else return false;
+                } else if (select) {
+                    const existing_match_id = if (try self.db.category_autofill.get(
+                        transaction.payee.payee.id,
+                        transaction.memo,
+                        transaction.amount,
+                        &self.data.categories,
+                    )) |match| match.autofill_id else null;
+                    var editor = CategoryEditor.init(
+                        self.allocator,
+                        &self.db,
+                        &transaction.category,
+                        existing_match_id,
+                    );
+                    maybe_editor.* = editor;
                 }
-                try lower_box.writer().writeAll("(s)elect a category");
-                if (char_input) |char| switch (char) {
-                    's' => {
-                        const existing_match_id = if (try self.db.category_autofill.get(
-                            transaction.payee.payee.id,
-                            transaction.memo,
-                            transaction.amount,
-                            &self.data.categories,
-                        )) |match| match.autofill_id else null;
-                        var editor = CategoryEditor.init(
-                            self.allocator,
-                            &self.db,
-                            &transaction.category,
-                            existing_match_id,
-                        );
-                        maybe_editor.* = editor;
-                    },
-                    else => {},
-                };
             },
             .memo => |*maybe_editor| {
                 if (maybe_editor.*) |*memo| {
@@ -442,18 +439,13 @@ fn render_internal(
                             input = after_submit;
                         },
                     } else return false;
+                } else if (select) {
+                    maybe_editor.* = try MemoEditor.init(
+                        self.allocator,
+                        transaction.memo,
+                    );
+                    return false;
                 }
-                try lower_box.writer().writeAll("(e)dit memo");
-                if (char_input) |char| switch (char) {
-                    'e' => {
-                        maybe_editor.* = try MemoEditor.init(
-                            self.allocator,
-                            transaction.memo,
-                        );
-                        return false;
-                    },
-                    else => {},
-                };
             },
         }
     }
