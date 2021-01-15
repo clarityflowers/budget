@@ -16,19 +16,19 @@ var level = switch (builtin.mode) {
     .ReleaseSafe, .ReleaseFast, .ReleaseSmall => .info,
 };
 
+var logfile: ?std.fs.File = null;
+
 pub fn log(
     comptime log_level: std.log.Level,
     comptime scope: @TypeOf(.EnumLiteral),
     comptime format: []const u8,
     args: anytype,
 ) void {
-    const stderr_file = std.io.getStdErr();
+    const stderr_file = if (logfile) |f| f else std.io.getStdErr();
     const stderr = stderr_file.writer();
     const include_scope = !std.io.getStdIn().isTty() or !std.io.getStdOut().isTty();
 
     if (@enumToInt(log_level) > @enumToInt(std.log.level)) return;
-    const needs_end = ncurses.isEnd() == false;
-    if (needs_end) ncurses.end();
 
     if (use_colors) {
         comptime const color_for_level = getColorForLevel(log_level);
@@ -49,9 +49,27 @@ pub fn log(
             nosuspend stderr.print(level_tag ++ format ++ "\n", args) catch return;
         }
     }
-    if (needs_end) {
-        if (ncurses.getStdScreen()) |window| {
-            window.refresh() catch {};
+}
+
+const logfile_path = "budget.log";
+
+pub fn openLogfile() !void {
+    logfile = try std.fs.cwd().createFile(logfile_path, .{ .read = true });
+}
+
+pub fn closeLogfile() void {
+    if (logfile) |file| {
+        const stderr = std.io.getStdErr().writer();
+        file.seekTo(0) catch {};
+        const reader = file.reader();
+        const buffer_size = 256;
+        var buffer: [buffer_size]u8 = undefined;
+        while (true) {
+            const len = reader.read(&buffer) catch break;
+            stderr.writeAll(buffer[0..len]) catch {};
+            if (len < buffer_size) break;
         }
+        file.close();
+        std.fs.cwd().deleteFile(logfile_path) catch {};
     }
 }

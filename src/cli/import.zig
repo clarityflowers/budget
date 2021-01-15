@@ -12,6 +12,8 @@ pub fn runInteractiveImport(
     data: *import.PreparedImport,
     allocator: *std.mem.Allocator,
 ) !void {
+    try log.openLogfile();
+    defer log.closeLogfile();
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
