@@ -79,23 +79,19 @@ pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) !?Result {
                     self.state = .{ .select = Select.init(self.allocator, self.db) };
                     return null;
                 },
-                '\r' => {
-                    return Result{
-                        .submit = .{
-                            .selection = selection,
-                        },
-                    };
+                '\r' => return Result{
+                    .submit = .{
+                        .selection = selection,
+                    },
                 },
-                else => {},
-            };
-            if (input != null and input.? == .char and input.?.char == 'p') {
-                return Result{
+                'p' => return Result{
                     .submit = .{
                         .selection = selection,
                         .pattern = true,
                     },
-                };
-            }
+                },
+                else => {},
+            };
             if (self.category.* != null) {
                 if (self.existing_match_id) |id| {
                     try box.writer().writeAll("(⏎)complete, or update existing (p)attern.");
