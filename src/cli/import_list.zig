@@ -6,6 +6,7 @@ const Currency = @import("../Currency.zig");
 
 pub const FieldTag = enum {
     date,
+    amount,
     payee,
     category,
     memo,
@@ -58,10 +59,23 @@ pub fn render(
                 writer.print("{}", .{transaction.payee}) catch {};
             }
         }
-        window.move(.{ .line = row + 1 });
-        const amount = Currency{ .amount = transaction.amount };
-        window.attrSet(0) catch {};
-        writer.print("{: >11} │ ", .{amount}) catch {};
+        {
+            window.move(.{ .line = row + 1 });
+            const highlight = is_current and field == .amount;
+            if (transaction.amount == 0 and highlight) {
+                window.attrSet(attr(.attention_highlight)) catch {};
+            } else if (transaction.amount == 0) {
+                window.attrSet(attr(.attention)) catch {};
+            } else if (highlight) {
+                window.attrSet(attr(.highlight)) catch {};
+            } else {
+                window.attrSet(0) catch {};
+            }
+            defer window.attrSet(0) catch {};
+            const amount = Currency{ .amount = transaction.amount };
+            try writer.print("{: >11}", .{amount});
+        }
+        try writer.writeAll(" │ ");
         {
             const highlight = is_current and field == .category;
             if (transaction.category) |category| {

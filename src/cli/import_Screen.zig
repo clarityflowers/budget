@@ -1,4 +1,5 @@
 const std = @import("std");
+const AmountEditor = @import("import_AmountEditor.zig");
 const DateEditor = @import("import_DateEditor.zig");
 const PayeeEditor = @import("import_PayeeEditor.zig");
 const CategoryEditor = @import("import_CategoryEditor.zig");
@@ -34,6 +35,7 @@ seen_instructions: bool = false,
 
 const Field = union(list.FieldTag) {
     date: ?DateEditor,
+    amount: ?AmountEditor,
     payee: ?PayeeEditor,
     category: ?CategoryEditor,
     memo: ?MemoEditor,
@@ -74,6 +76,7 @@ pub fn deinit(self: *@This()) void {
 pub fn isMissing(self: @This(), state: ScreenState) bool {
     const transaction = self.data.transactions[state.current];
     return switch (state.field) {
+        .amount => transaction.amount == 0,
         .date => false,
         .payee => transaction.payee == .unknown,
         .category => transaction.payee == .payee and transaction.category == null,
@@ -100,6 +103,7 @@ pub fn moveUp(self: @This(), state: ScreenState) ScreenState {
     }
     switch (result.field) {
         .date => result.field = .{ .date = null },
+        .amount => result.field = .{ .amount = null },
         .payee => result.field = .{ .payee = null },
         .category => {
             if (self.data.transactions[result.current].payee == .payee) {
@@ -118,6 +122,7 @@ pub fn moveDown(self: @This(), state: ScreenState) ScreenState {
     result.current = (result.current + 1) % self.data.transactions.len;
     switch (result.field) {
         .date => result.field = .{ .date = null },
+        .amount => result.field = .{ .amount = null },
         .payee => result.field = .{ .payee = null },
         .category => {
             if (self.data.transactions[result.current].payee == .payee) {
@@ -135,6 +140,9 @@ pub fn next(self: @This(), state: ScreenState) ScreenState {
     var result = state;
     switch (result.field) {
         .date => {
+            result.field = .{ .amount = null };
+        },
+        .amount => {
             result.field = .{ .payee = null };
         },
         .payee => {
@@ -161,8 +169,11 @@ pub fn prev(self: @This(), state: ScreenState) ScreenState {
             result = self.moveUp(result);
             result.field = .{ .memo = null };
         },
-        .payee => {
+        .amount => {
             result.field = .{ .date = null };
+        },
+        .payee => {
+            result.field = .{ .amount = null };
         },
         .category => {
             result.field = .{ .payee = null };
@@ -278,7 +289,7 @@ fn render_internal(
             if (input != null) {
                 self.seen_instructions = true;
             } else {
-                try writer.writeAll("( )edit (⇥/⇧⇥)next/prev value (↓/↑)next/prev item (⏎)next unfilled");
+                try writer.writeAll("( )edit (tab/s-tab)next/prev value (↓/↑)next/prev item (ret)next unfilled");
             }
         }
         const transaction = &self.data.transactions[self.state.current];
@@ -299,6 +310,24 @@ fn render_internal(
                     } else input = null;
                 } else if (select) {
                     var editor = DateEditor.init(transaction.date);
+                    maybe_editor.* = editor;
+                }
+            },
+            .amount => |*maybe_editor| {
+                if (maybe_editor.*) |*amount_editor| {
+                    if (try amount_editor.render(&lower_box, input)) |result| switch (result) {
+                        .cancel => {
+                            amount_editor.deinit();
+                            maybe_editor.* = null;
+                            input = null;
+                        },
+                        .submit => |amount| {
+                            transaction.amount = amount;
+                            input = after_submit;
+                        },
+                    } else input = null;
+                } else if (select) {
+                    var editor = AmountEditor.init(transaction.amount);
                     maybe_editor.* = editor;
                 }
             },
@@ -520,6 +549,7 @@ fn render_internal(
     if (new_state) |ns| {
         switch (self.state.field) {
             .date => |*date| if (date.*) |*d| d.deinit(),
+            .amount => |*amount| if (amount.*) |*a| a.deinit(),
             .payee => |*payee| if (payee.*) |*p| p.deinit(),
             .category => |*category| if (category.*) |*c| c.deinit(),
             .memo => |*memo| if (memo.*) |*m| m.deinit(),

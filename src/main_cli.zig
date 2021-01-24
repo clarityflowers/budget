@@ -234,7 +234,7 @@ const Spec = union(enum) {
 //      - [x] altering existing autocompletes
 //      - [x] set note
 //      - [x] set date
-//      - [ ] set amount
+//      - [x] set amount
 //      - [ ] split transactions
 //      - [ ] add new transaction
 //      - [ ] check totals
