@@ -22,6 +22,14 @@ attempting_interrupt: bool = false,
 initialized: bool = false,
 err: Err,
 
+// COMMANDS
+// tab/shift+tab   go to next/previous field
+// down/up         go to next/previous transaction
+// enter           go to next empty field
+// space           edit currently selected field
+// ^c              quit
+// `               show console output
+
 seen_instructions: bool = false,
 
 const Field = union(list.FieldTag) {

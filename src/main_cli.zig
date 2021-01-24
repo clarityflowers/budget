@@ -231,17 +231,23 @@ const Spec = union(enum) {
 //      - [x] typing to insert new values
 //      - [x] autocomplete
 //      - [x] set up new autocompletes
-//      - [ ] rename categories & groups
-//      - [ ] set note
-//      - [ ] set date
+//      - [x] altering existing autocompletes
+//      - [x] set note
+//      - [x] set date
 //      - [ ] set amount
 //      - [ ] split transactions
 //      - [ ] add new transaction
 //      - [ ] check totals
+//      - [ ] sql mode
+//      - [ ] run arbitrary command
 //
 //  don't work on these things yet!!!
 //  - [ ] help text
-//  - [ ] altering existing autocompletes
+//
+//  out of scope
+//  - cli
+//      - rename categories & groups
+//      - create auto-splits
 
 pub fn getBudgetFilePath(options: anytype, allocator: *std.mem.Allocator) ![:0]const u8 {
     const slice = options.budget orelse (std.process.getEnvVarOwned(allocator, "BUDGET_PATH") catch |err| switch (err) {
