@@ -215,3 +215,13 @@ pub fn getAccounts(db: *const sqlite.Database, allocator: *std.mem.Allocator) !A
     accounts.allocator = allocator;
     return accounts;
 }
+
+pub fn getIdForName(db: *const sqlite.Database, name: []const u8) !?i64 {
+    const statement = try db.prepare(
+        \\ SELECT id FROM accounts WHERE name = ?
+    );
+    try statement.bind(.{name});
+    defer statement.finalize() catch {};
+    if (!try statement.step()) return null;
+    return statement.columnInt64(0);
+}

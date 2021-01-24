@@ -168,6 +168,7 @@ const Spec = union(enum) {
         pub fn exec(result: ParseArgsResult(@This()), context: Context) !void {
             const db_file = try getBudgetFilePath(result.options, context.allocator);
             const db = try sqlite.Database.openWithOptions(db_file, .{ .mode = .readwrite });
+            const account_id = (try account_actions.getIdForName(&db, result.options._.name)) orelse return error.AccountNotFound;
             const reader = if (result.options.file) |file|
                 (try std.fs.cwd().openFile(file, .{})).reader()
             else
@@ -178,7 +179,7 @@ const Spec = union(enum) {
                 reader,
                 context.allocator,
             );
-            try cli.runInteractiveImport(&db, &prepared_import, context.allocator);
+            try cli.runInteractiveImport(&db, &prepared_import, context.allocator, account_id);
         }
     },
     account: union(enum) {

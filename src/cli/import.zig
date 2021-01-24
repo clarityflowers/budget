@@ -11,6 +11,7 @@ pub fn runInteractiveImport(
     db: *const sqlite.Database,
     data: *import.PreparedImport,
     allocator: *std.mem.Allocator,
+    account_id: i64,
 ) !void {
     try log.openLogfile();
     defer log.closeLogfile();
@@ -46,7 +47,7 @@ pub fn runInteractiveImport(
     //     std.time.sleep(1000);
     // }
 
-    var screen = try Screen.init(db, data, allocator);
+    var screen = try Screen.init(db, data, allocator, account_id);
 
     defer screen.deinit();
     if (try screen.render(&window.wholeBox(), null)) return;

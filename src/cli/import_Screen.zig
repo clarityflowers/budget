@@ -5,6 +5,7 @@ const PayeeEditor = @import("import_PayeeEditor.zig");
 const CategoryEditor = @import("import_CategoryEditor.zig");
 const MemoEditor = @import("import_MemoEditor.zig");
 const sqlite = @import("../sqlite-zig/src/sqlite.zig");
+const Currency = @import("../Currency.zig");
 const ncurses = @import("ncurses.zig");
 const import = @import("../import.zig");
 const log = @import("../log.zig");
@@ -17,11 +18,16 @@ const unicode = @import("unicode.zig");
 db: Database,
 allocator: *std.mem.Allocator,
 data: *import.PreparedImport,
+account_id: i64,
 transactions: std.ArrayList(import.ImportedTransaction),
 // payees: std.AutoHashMap(i64, import.Payee),
 state: ScreenState = .{},
-split_editor: ?AmountEditor = null,
-attempting_interrupt: bool = false,
+action: union(enum) {
+    split: AmountEditor,
+    attempting_interrupt,
+    show_balance,
+    none,
+} = .none,
 initialized: bool = false,
 err: Err,
 
@@ -35,6 +41,7 @@ err: Err,
 // n                new transaction
 // D                delete transaction
 // s                split transaction
+// b                view new account balance
 
 seen_instructions: bool = false,
 
@@ -56,6 +63,7 @@ pub fn init(
     db: *const sqlite.Database,
     data: *import.PreparedImport,
     allocator: *std.mem.Allocator,
+    account_id: i64,
 ) !@This() {
     std.debug.assert(data.transactions.len > 0);
     var database = try Database.init(db);
@@ -70,6 +78,7 @@ pub fn init(
         },
         .transactions = std.ArrayList(import.ImportedTransaction).fromOwnedSlice(allocator, data.transactions),
         .err = Err.init(allocator),
+        .account_id = account_id,
     };
     return result;
 }
@@ -212,6 +221,7 @@ pub fn render(
             error.CreateCategoryFailed,
             error.AutofillPayeesFailed,
             error.AutofillCategoriesFailed,
+            error.ShowBalanceFailed,
             => self.err.set("Err: {}. {}", .{ @errorName(err), self.db.getError() }) catch {},
             error.OutOfMemory,
             error.InvalidUtf8,
@@ -234,6 +244,7 @@ const Error = error{
     CreateCategoryMatchFailed,
     AutofillCategoriesFailed,
     UpdateMatchFailed,
+    ShowBalanceFailed,
 } || std.mem.Allocator.Error ||
     PayeeEditor.Error;
 
@@ -284,277 +295,316 @@ fn render_internal(
     }
 
     const select = char_input != null and char_input.? == ' ';
+    const cancel = char_input != null and char_input.? == 0x03;
 
     var new_state: ?ScreenState = null;
 
-    if (self.attempting_interrupt) {
-        lower_box.move(.{});
-        lower_box.writer().print("Press ^C again to quit.", .{}) catch {};
-    } else if (self.split_editor) |*split_editor| {
-        lower_box.move(.{ .line = 1 });
-        try lower_box.writer().writeAll("Enter an amount to split into a new transaction");
-        lower_box.move(.{});
-        if (try split_editor.render(&lower_box, input)) |result| switch (result) {
-            .cancel => {
-                split_editor.deinit();
-                self.split_editor = null;
-            },
-            .submit => |amount| {
-                split_editor.deinit();
-                self.split_editor = null;
-                const transaction = &self.transactions.items[self.state.current];
-                const new_memo = try self.allocator.dupe(u8, transaction.memo);
-                errdefer self.allocator.free(new_memo);
-                const new_payee = switch (transaction.payee) {
-                    .unknown => |str| @as(import.ImportPayee, .{ .unknown = try self.allocator.dupe(u8, str) }),
-                    else => transaction.payee,
-                };
-                errdefer if (new_payee == .unknown) self.allocator.free(new_payee.unknown);
-
-                try self.transactions.insert(self.state.current + 1, .{
-                    .date = transaction.date,
-                    .amount = amount,
-                    .payee = new_payee,
-                    .category = transaction.category,
-                    .memo = new_memo,
-                    .id = transaction.id,
-                });
-                self.transactions.items[self.state.current].amount -= amount;
-            },
-        };
-    } else {
-        const writer = lower_box.writer();
-        if (!self.seen_instructions) {
-            if (input != null) {
-                self.seen_instructions = true;
-            } else {
-                try writer.writeAll("( )edit (tab/s-tab)next/prev value (↓/↑)next/prev item (ret)next unfilled");
+    switch (self.action) {
+        .attempting_interrupt => {
+            lower_box.move(.{});
+            lower_box.writer().print("Press ^C again to quit.", .{}) catch {};
+            if (cancel) {
+                return true;
+            } else if (input != null) {
+                self.action = .none;
+                return false;
             }
-        }
-        const transaction = &self.transactions.items[self.state.current];
+        },
+        .show_balance => {
+            lower_box.move(.{});
+            const current_total = blk: {
+                const statement = self.db.handle.prepare(
+                    \\ SELECT SUM(amount) from transactions
+                    \\ WHERE account_id = ?
+                ) catch return error.ShowBalanceFailed;
+                defer statement.finalize() catch {};
+                statement.bind(.{self.account_id}) catch return error.ShowBalanceFailed;
+                std.debug.assert(statement.step() catch return error.ShowBalanceFailed);
+                break :blk statement.columnInt(0);
+            };
+            var new_total = current_total;
+            for (self.transactions.items) |transaction| {
+                new_total += transaction.amount;
+            }
+            const new_total_currency: Currency = .{ .amount = new_total };
+            const current_total_currency: Currency = .{ .amount = current_total };
+            try lower_box.writer().print("New account balance: {}, previously {}", .{
+                new_total_currency,
+                current_total_currency,
+            });
 
-        switch (self.state.field) {
-            .date => |*maybe_editor| {
-                if (maybe_editor.*) |*date_editor| {
-                    if (try date_editor.render(&lower_box, input)) |result| switch (result) {
-                        .cancel => {
-                            date_editor.deinit();
-                            maybe_editor.* = null;
-                            input = null;
-                        },
-                        .submit => |date| {
-                            transaction.date = date;
-                            input = after_submit;
-                            const new_position = blk: {
-                                const transactions = self.transactions.items;
-                                var index = self.state.current;
-                                while (index + 1 < transactions.len and
-                                    transactions[index].date.isAfter(transactions[index + 1].date)) : (index += 1)
-                                {
-                                    std.mem.swap(
-                                        import.ImportedTransaction,
-                                        &transactions[index],
-                                        &transactions[index + 1],
-                                    );
-                                }
-                                while (index > 0 and transactions[index].date.isBefore(transactions[index - 1].date)) : (index -= 1) {
-                                    std.mem.swap(
-                                        import.ImportedTransaction,
-                                        &transactions[index],
-                                        &transactions[index - 1],
-                                    );
-                                }
-                                break :blk index;
-                            };
-                            self.state = .{
-                                .current = new_position,
-                                .field = self.state.field,
-                            };
-                            input = after_submit;
-                        },
-                    } else input = null;
-                } else if (select) {
-                    var editor = DateEditor.init(transaction.date);
-                    maybe_editor.* = editor;
+            if (input != null) {
+                self.action = .none;
+                return false;
+            }
+        },
+        .split => |*split_editor| {
+            lower_box.move(.{ .line = 1 });
+            try lower_box.writer().writeAll("Enter an amount to split into a new transaction");
+            lower_box.move(.{});
+            if (try split_editor.render(&lower_box, input)) |result| switch (result) {
+                .cancel => {
+                    split_editor.deinit();
+                    self.action = .none;
+                },
+                .submit => |amount| {
+                    split_editor.deinit();
+                    self.action = .none;
+                    const transaction = &self.transactions.items[self.state.current];
+                    const new_memo = try self.allocator.dupe(u8, transaction.memo);
+                    errdefer self.allocator.free(new_memo);
+                    const new_payee = switch (transaction.payee) {
+                        .unknown => |str| @as(import.ImportPayee, .{ .unknown = try self.allocator.dupe(u8, str) }),
+                        else => transaction.payee,
+                    };
+                    errdefer if (new_payee == .unknown) self.allocator.free(new_payee.unknown);
+
+                    try self.transactions.insert(self.state.current + 1, .{
+                        .date = transaction.date,
+                        .amount = amount,
+                        .payee = new_payee,
+                        .category = transaction.category,
+                        .memo = new_memo,
+                        .id = transaction.id,
+                    });
+                    self.transactions.items[self.state.current].amount -= amount;
+                },
+            };
+            return false;
+        },
+        .none => {
+            const writer = lower_box.writer();
+            if (!self.seen_instructions) {
+                if (input != null) {
+                    self.seen_instructions = true;
+                } else {
+                    try writer.writeAll("( )edit (tab/s-tab)next/prev value (↓/↑)next/prev item (ret)next unfilled");
                 }
-            },
-            .amount => |*maybe_editor| {
-                if (maybe_editor.*) |*amount_editor| {
-                    if (try amount_editor.render(&lower_box, input)) |result| switch (result) {
-                        .cancel => {
-                            amount_editor.deinit();
-                            maybe_editor.* = null;
-                            input = null;
-                        },
-                        .submit => |amount| {
-                            transaction.amount = amount;
-                            input = after_submit;
-                        },
-                    } else input = null;
-                } else if (select) {
-                    var editor = AmountEditor.init(transaction.amount);
-                    maybe_editor.* = editor;
-                }
-            },
-            .payee => |*maybe_editor| {
-                if (maybe_editor.*) |*payee_editor| {
-                    const result = try payee_editor.render(input, &lower_box, &self.db);
-                    if (result) |res| switch (res) {
-                        .cancel => {
-                            payee_editor.deinit();
-                            maybe_editor.* = null;
-                            input = null;
-                        },
-                        .submit => |submission| {
-                            defer submission.payee.deinit(self.allocator);
-                            const current_payee = self.transactions.items[self.state.current].payee;
-                            const id = try self.setPayee(submission.payee);
-                            switch (current_payee) {
-                                .unknown => |unknown| {
-                                    defer self.allocator.free(unknown);
-                                    if (submission.match) |match| {
-                                        _ = try self.createMatch(id, match.match, match.pattern);
-                                        try import.autofillPayees(
-                                            self.db.handle,
-                                            "",
-                                            self.transactions.items,
-                                            &self.data.payees,
-                                            &self.data.accounts,
+            }
+            const transaction = &self.transactions.items[self.state.current];
+
+            switch (self.state.field) {
+                .date => |*maybe_editor| {
+                    if (maybe_editor.*) |*date_editor| {
+                        if (try date_editor.render(&lower_box, input)) |result| switch (result) {
+                            .cancel => {
+                                date_editor.deinit();
+                                maybe_editor.* = null;
+                                input = null;
+                            },
+                            .submit => |date| {
+                                transaction.date = date;
+                                input = after_submit;
+                                const new_position = blk: {
+                                    const transactions = self.transactions.items;
+                                    var index = self.state.current;
+                                    while (index + 1 < transactions.len and
+                                        transactions[index].date.isAfter(transactions[index + 1].date)) : (index += 1)
+                                    {
+                                        std.mem.swap(
+                                            import.ImportedTransaction,
+                                            &transactions[index],
+                                            &transactions[index + 1],
                                         );
                                     }
-                                },
-                                else => {},
-                            }
-                            // After filling out a payee, autofill that transaction's categories
-                            try import.autofillCategories(
-                                self.db.handle,
-                                self.transactions.items[self.state.current .. self.state.current + 1],
-                                &self.data.categories,
-                            );
-                            input = after_submit;
-                        },
-                    } else input = null;
-                } else if (select) {
-                    var editor = PayeeEditor.init(transaction.payee, self.allocator);
-                    maybe_editor.* = editor;
-                }
-            },
-            .category => |*maybe_editor| {
-                if (maybe_editor.*) |*category| {
-                    if (try category.render(&lower_box, input)) |result| switch (result) {
-                        .cancel => {
-                            category.deinit();
-                            maybe_editor.* = null;
-                            input = null;
-                        },
-                        .submit => |submission| {
-                            const id = switch (submission.selection) {
-                                .existing => |id| blk: {
-                                    switch (id) {
-                                        .income => {
-                                            transaction.category = .income;
-                                        },
-                                        .budget => |category_id| {
-                                            transaction.category = .{
-                                                .budget = &(self.data.categories.getEntry(category_id) orelse unreachable).value,
-                                            };
-                                        },
+                                    while (index > 0 and transactions[index].date.isBefore(transactions[index - 1].date)) : (index -= 1) {
+                                        std.mem.swap(
+                                            import.ImportedTransaction,
+                                            &transactions[index],
+                                            &transactions[index - 1],
+                                        );
                                     }
-                                    break :blk id;
-                                },
-                                .new => |new| new_blk: {
-                                    const group = switch (new.group) {
-                                        .existing => |id| &(self.data.category_groups.getEntry(id) orelse {
-                                            try self.err.set("Entry not found: {}", .{id});
-                                            return false;
-                                        }).value,
-                                        .new => |name| blk: {
-                                            const name_utf8 = try unicode.encodeUtf8Alloc(name, self.allocator);
-                                            errdefer self.allocator.free(name_utf8);
-                                            const id = try self.db.createCategoryGroup(name_utf8);
-                                            const res = try self.data.category_groups.getOrPut(id);
-                                            std.debug.assert(!res.found_existing);
-                                            res.entry.value = .{ .id = id, .name = name_utf8 };
-                                            break :blk &res.entry.value;
-                                        },
-                                    };
-                                    const name_utf8 = try unicode.encodeUtf8Alloc(new.name, self.allocator);
-                                    errdefer self.allocator.free(name_utf8);
-                                    const id = try self.db.createCategory(group.id, name_utf8);
-                                    const res = try self.data.categories.getOrPut(id);
-                                    std.debug.assert(!res.found_existing);
-                                    res.entry.value = .{
-                                        .id = id,
-                                        .group = group,
-                                        .name = name_utf8,
-                                    };
-                                    transaction.category = .{
-                                        .budget = &res.entry.value,
-                                    };
-                                    break :new_blk Database.CategoryId{ .budget = id };
-                                },
-                            };
-                            if (submission.pattern) {
-                                const category_id = switch (id) {
-                                    .income => @as(?i64, null),
-                                    .budget => |budget_id| @as(?i64, budget_id),
+                                    break :blk index;
                                 };
-                                self.db.handle.execBind("INSERT OR REPLACE INTO category_matches(category_id, payee_id) VALUES (?, ?)", .{
-                                    category_id,
-                                    transaction.payee.payee.id,
-                                }) catch return Error.CreateCategoryMatchFailed;
-
+                                self.state = .{
+                                    .current = new_position,
+                                    .field = self.state.field,
+                                };
+                                input = after_submit;
+                            },
+                        } else input = null;
+                    } else if (select) {
+                        var editor = DateEditor.init(transaction.date);
+                        maybe_editor.* = editor;
+                    }
+                },
+                .amount => |*maybe_editor| {
+                    if (maybe_editor.*) |*amount_editor| {
+                        if (try amount_editor.render(&lower_box, input)) |result| switch (result) {
+                            .cancel => {
+                                amount_editor.deinit();
+                                maybe_editor.* = null;
+                                input = null;
+                            },
+                            .submit => |amount| {
+                                transaction.amount = amount;
+                                input = after_submit;
+                            },
+                        } else input = null;
+                    } else if (select) {
+                        var editor = AmountEditor.init(transaction.amount);
+                        maybe_editor.* = editor;
+                    }
+                },
+                .payee => |*maybe_editor| {
+                    if (maybe_editor.*) |*payee_editor| {
+                        const result = try payee_editor.render(input, &lower_box, &self.db);
+                        if (result) |res| switch (res) {
+                            .cancel => {
+                                payee_editor.deinit();
+                                maybe_editor.* = null;
+                                input = null;
+                            },
+                            .submit => |submission| {
+                                defer submission.payee.deinit(self.allocator);
+                                const current_payee = self.transactions.items[self.state.current].payee;
+                                const id = try self.setPayee(submission.payee);
+                                switch (current_payee) {
+                                    .unknown => |unknown| {
+                                        defer self.allocator.free(unknown);
+                                        if (submission.match) |match| {
+                                            _ = try self.createMatch(id, match.match, match.pattern);
+                                            try import.autofillPayees(
+                                                self.db.handle,
+                                                "",
+                                                self.transactions.items,
+                                                &self.data.payees,
+                                                &self.data.accounts,
+                                            );
+                                        }
+                                    },
+                                    else => {},
+                                }
+                                // After filling out a payee, autofill that transaction's categories
                                 try import.autofillCategories(
                                     self.db.handle,
-                                    self.transactions.items,
+                                    self.transactions.items[self.state.current .. self.state.current + 1],
                                     &self.data.categories,
                                 );
-                            }
-                            input = after_submit;
-                        },
-                    } else return false;
-                } else if (select) {
-                    const existing_match_id = if (try self.db.category_autofill.get(
-                        transaction.payee.payee.id,
-                        transaction.memo,
-                        transaction.amount,
-                        &self.data.categories,
-                    )) |match| match.autofill_id else null;
-                    var editor = CategoryEditor.init(
-                        self.allocator,
-                        &self.db,
-                        &transaction.category,
-                        existing_match_id,
-                    );
-                    maybe_editor.* = editor;
-                }
-            },
-            .memo => |*maybe_editor| {
-                if (maybe_editor.*) |*memo| {
-                    if (try memo.render(&lower_box, input)) |result| switch (result) {
-                        .cancel => {
-                            memo.deinit();
-                            maybe_editor.* = null;
-                            input = null;
-                        },
-                        .submit => |new_memo| {
-                            self.allocator.free(transaction.memo);
-                            transaction.memo = new_memo;
-                            input = after_submit;
-                        },
-                    } else return false;
-                } else if (select) {
-                    maybe_editor.* = try MemoEditor.init(
-                        self.allocator,
-                        transaction.memo,
-                    );
-                    return false;
-                }
-            },
-        }
+                                input = after_submit;
+                            },
+                        } else input = null;
+                    } else if (select) {
+                        var editor = PayeeEditor.init(transaction.payee, self.allocator);
+                        maybe_editor.* = editor;
+                    }
+                },
+                .category => |*maybe_editor| {
+                    if (maybe_editor.*) |*category| {
+                        if (try category.render(&lower_box, input)) |result| switch (result) {
+                            .cancel => {
+                                category.deinit();
+                                maybe_editor.* = null;
+                                input = null;
+                            },
+                            .submit => |submission| {
+                                const id = switch (submission.selection) {
+                                    .existing => |id| blk: {
+                                        switch (id) {
+                                            .income => {
+                                                transaction.category = .income;
+                                            },
+                                            .budget => |category_id| {
+                                                transaction.category = .{
+                                                    .budget = &(self.data.categories.getEntry(category_id) orelse unreachable).value,
+                                                };
+                                            },
+                                        }
+                                        break :blk id;
+                                    },
+                                    .new => |new| new_blk: {
+                                        const group = switch (new.group) {
+                                            .existing => |id| &(self.data.category_groups.getEntry(id) orelse {
+                                                try self.err.set("Entry not found: {}", .{id});
+                                                return false;
+                                            }).value,
+                                            .new => |name| blk: {
+                                                const name_utf8 = try unicode.encodeUtf8Alloc(name, self.allocator);
+                                                errdefer self.allocator.free(name_utf8);
+                                                const id = try self.db.createCategoryGroup(name_utf8);
+                                                const res = try self.data.category_groups.getOrPut(id);
+                                                std.debug.assert(!res.found_existing);
+                                                res.entry.value = .{ .id = id, .name = name_utf8 };
+                                                break :blk &res.entry.value;
+                                            },
+                                        };
+                                        const name_utf8 = try unicode.encodeUtf8Alloc(new.name, self.allocator);
+                                        errdefer self.allocator.free(name_utf8);
+                                        const id = try self.db.createCategory(group.id, name_utf8);
+                                        const res = try self.data.categories.getOrPut(id);
+                                        std.debug.assert(!res.found_existing);
+                                        res.entry.value = .{
+                                            .id = id,
+                                            .group = group,
+                                            .name = name_utf8,
+                                        };
+                                        transaction.category = .{
+                                            .budget = &res.entry.value,
+                                        };
+                                        break :new_blk Database.CategoryId{ .budget = id };
+                                    },
+                                };
+                                if (submission.pattern) {
+                                    const category_id = switch (id) {
+                                        .income => @as(?i64, null),
+                                        .budget => |budget_id| @as(?i64, budget_id),
+                                    };
+                                    self.db.handle.execBind("INSERT OR REPLACE INTO category_matches(category_id, payee_id) VALUES (?, ?)", .{
+                                        category_id,
+                                        transaction.payee.payee.id,
+                                    }) catch return Error.CreateCategoryMatchFailed;
+
+                                    try import.autofillCategories(
+                                        self.db.handle,
+                                        self.transactions.items,
+                                        &self.data.categories,
+                                    );
+                                }
+                                input = after_submit;
+                            },
+                        } else return false;
+                    } else if (select) {
+                        const existing_match_id = if (try self.db.category_autofill.get(
+                            transaction.payee.payee.id,
+                            transaction.memo,
+                            transaction.amount,
+                            &self.data.categories,
+                        )) |match| match.autofill_id else null;
+                        var editor = CategoryEditor.init(
+                            self.allocator,
+                            &self.db,
+                            &transaction.category,
+                            existing_match_id,
+                        );
+                        maybe_editor.* = editor;
+                    }
+                },
+                .memo => |*maybe_editor| {
+                    if (maybe_editor.*) |*memo| {
+                        if (try memo.render(&lower_box, input)) |result| switch (result) {
+                            .cancel => {
+                                memo.deinit();
+                                maybe_editor.* = null;
+                                input = null;
+                            },
+                            .submit => |new_memo| {
+                                self.allocator.free(transaction.memo);
+                                transaction.memo = new_memo;
+                                input = after_submit;
+                            },
+                        } else return false;
+                    } else if (select) {
+                        maybe_editor.* = try MemoEditor.init(
+                            self.allocator,
+                            transaction.memo,
+                        );
+                        return false;
+                    }
+                },
+            }
+        },
     }
 
-    var attempting_interrupt = false;
     if (input) |key| {
         switch (key) {
             .control => |ctl| switch (ctl) {
@@ -571,11 +621,8 @@ fn render_internal(
             },
             .char => |chr| switch (chr) {
                 0x03 => { // ^C
-                    if (self.attempting_interrupt) {
-                        return error.Interrupted;
-                    } else {
-                        attempting_interrupt = true;
-                    }
+                    self.action = .attempting_interrupt;
+                    return false;
                 },
                 '`' => {
                     ncurses.end();
@@ -613,27 +660,24 @@ fn render_internal(
                         self.transactions.items[self.state.current].free(self.allocator);
                         _ = self.transactions.orderedRemove(self.state.current);
                         new_state = self.moveUp(self.state);
+                        return false;
                     }
                 },
                 's' => {
                     if (self.transactions.items.len > 0) {
                         var amount_editor = AmountEditor.init(0);
                         amount_editor.negative = self.transactions.items[self.state.current].amount < 0;
-                        self.split_editor = amount_editor;
+                        self.action = .{ .split = amount_editor };
                         return false;
                     }
+                },
+                'b' => {
+                    self.action = .show_balance;
+                    return false;
                 },
                 else => {},
             },
             else => {},
-        }
-        if (attempting_interrupt) {
-            self.attempting_interrupt = true;
-            return false;
-        } else {
-            if (self.attempting_interrupt) {
-                self.attempting_interrupt = false;
-            }
         }
     }
     if (new_state) |ns| {
