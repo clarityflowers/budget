@@ -235,8 +235,8 @@ const Spec = union(enum) {
 //      - [x] set note
 //      - [x] set date
 //      - [x] set amount
-//      - [ ] split transactions
-//      - [ ] add new transaction
+//      - [x] split transactions
+//      - [x] add new transaction
 //      - [ ] check totals
 //      - [ ] sql mode
 //      - [ ] run arbitrary command

@@ -20,6 +20,7 @@ data: *import.PreparedImport,
 transactions: std.ArrayList(import.ImportedTransaction),
 // payees: std.AutoHashMap(i64, import.Payee),
 state: ScreenState = .{},
+split_editor: ?AmountEditor = null,
 attempting_interrupt: bool = false,
 initialized: bool = false,
 err: Err,
@@ -33,6 +34,7 @@ err: Err,
 // `                show console output
 // n                new transaction
 // D                delete transaction
+// s                split transaction
 
 seen_instructions: bool = false,
 
@@ -247,7 +249,6 @@ fn render_internal(
         self.initialized = true;
     }
     var input = input_key;
-    const transactions = self.transactions.items;
 
     const divider_line = box.bounds.height - 3;
 
@@ -284,9 +285,43 @@ fn render_internal(
 
     const select = char_input != null and char_input.? == ' ';
 
+    var new_state: ?ScreenState = null;
+
     if (self.attempting_interrupt) {
         lower_box.move(.{});
         lower_box.writer().print("Press ^C again to quit.", .{}) catch {};
+    } else if (self.split_editor) |*split_editor| {
+        lower_box.move(.{ .line = 1 });
+        try lower_box.writer().writeAll("Enter an amount to split into a new transaction");
+        lower_box.move(.{});
+        if (try split_editor.render(&lower_box, input)) |result| switch (result) {
+            .cancel => {
+                split_editor.deinit();
+                self.split_editor = null;
+            },
+            .submit => |amount| {
+                split_editor.deinit();
+                self.split_editor = null;
+                const transaction = &self.transactions.items[self.state.current];
+                const new_memo = try self.allocator.dupe(u8, transaction.memo);
+                errdefer self.allocator.free(new_memo);
+                const new_payee = switch (transaction.payee) {
+                    .unknown => |str| @as(import.ImportPayee, .{ .unknown = try self.allocator.dupe(u8, str) }),
+                    else => transaction.payee,
+                };
+                errdefer if (new_payee == .unknown) self.allocator.free(new_payee.unknown);
+
+                try self.transactions.insert(self.state.current + 1, .{
+                    .date = transaction.date,
+                    .amount = amount,
+                    .payee = new_payee,
+                    .category = transaction.category,
+                    .memo = new_memo,
+                    .id = transaction.id,
+                });
+                self.transactions.items[self.state.current].amount -= amount;
+            },
+        };
     } else {
         const writer = lower_box.writer();
         if (!self.seen_instructions) {
@@ -309,6 +344,32 @@ fn render_internal(
                         },
                         .submit => |date| {
                             transaction.date = date;
+                            input = after_submit;
+                            const new_position = blk: {
+                                const transactions = self.transactions.items;
+                                var index = self.state.current;
+                                while (index + 1 < transactions.len and
+                                    transactions[index].date.isAfter(transactions[index + 1].date)) : (index += 1)
+                                {
+                                    std.mem.swap(
+                                        import.ImportedTransaction,
+                                        &transactions[index],
+                                        &transactions[index + 1],
+                                    );
+                                }
+                                while (index > 0 and transactions[index].date.isBefore(transactions[index - 1].date)) : (index -= 1) {
+                                    std.mem.swap(
+                                        import.ImportedTransaction,
+                                        &transactions[index],
+                                        &transactions[index - 1],
+                                    );
+                                }
+                                break :blk index;
+                            };
+                            self.state = .{
+                                .current = new_position,
+                                .field = self.state.field,
+                            };
                             input = after_submit;
                         },
                     } else input = null;
@@ -494,7 +555,6 @@ fn render_internal(
     }
 
     var attempting_interrupt = false;
-    var new_state: ?ScreenState = null;
     if (input) |key| {
         switch (key) {
             .control => |ctl| switch (ctl) {
@@ -553,6 +613,14 @@ fn render_internal(
                         self.transactions.items[self.state.current].free(self.allocator);
                         _ = self.transactions.orderedRemove(self.state.current);
                         new_state = self.moveUp(self.state);
+                    }
+                },
+                's' => {
+                    if (self.transactions.items.len > 0) {
+                        var amount_editor = AmountEditor.init(0);
+                        amount_editor.negative = self.transactions.items[self.state.current].amount < 0;
+                        self.split_editor = amount_editor;
+                        return false;
                     }
                 },
                 else => {},
