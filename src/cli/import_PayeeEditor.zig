@@ -11,7 +11,10 @@ const Err = @import("Err.zig");
 
 state: union(enum) {
     edit: Edit,
-    ask_pattern: EditPayee,
+    ask_pattern: struct {
+        payee: EditPayee,
+        unknown: []const u8,
+    },
     pattern: Pattern,
 } = null,
 payee: import.ImportPayee,
@@ -51,7 +54,7 @@ pub fn init(
 pub fn deinit(self: *@This()) void {
     switch (self.state) {
         .edit => |*editor| editor.deinit(),
-        .ask_pattern => |*edit_payee| edit_payee.deinit(self.allocator),
+        .ask_pattern => |*edit_payee| edit_payee.payee.deinit(self.allocator),
         .pattern => |*editor| editor.payee.deinit(self.allocator),
     }
     self.err.deinit();
@@ -97,10 +100,20 @@ pub fn render(
                         return Result.cancel;
                     },
                     .submit => |submission| {
-                        self.state = .{
-                            .ask_pattern = submission,
-                        };
-                        return null;
+                        switch (self.payee) {
+                            .unknown => |unknown| {
+                                self.state = .{
+                                    .ask_pattern = .{
+                                        .payee = submission,
+                                        .unknown = unknown,
+                                    },
+                                };
+                                return null;
+                            },
+                            else => {
+                                return Result{ .submit = .{ .payee = submission } };
+                            },
+                        }
                     },
                 }
             } else return null;
@@ -108,40 +121,43 @@ pub fn render(
         .ask_pattern => |edit_payee| {
             if (input != null and input.? == .char) switch (input.?.char) {
                 0x03 => {
-                    defer edit_payee.deinit(self.allocator);
+                    defer edit_payee.payee.deinit(self.allocator);
                     self.state = .{ .edit = Edit.init(self.allocator) };
                     return null;
                 },
                 '\r' => {
-                    return Result{ .submit = .{ .payee = edit_payee } };
+                    return Result{ .submit = .{ .payee = edit_payee.payee } };
+                },
+                'e' => {
+                    return Result{
+                        .submit = .{
+                            .payee = edit_payee.payee,
+                            .match = .{
+                                .match = .exact,
+                                .pattern = edit_payee.unknown,
+                            },
+                        },
+                    };
+                },
+                'p' => {
+                    self.state = .{ .pattern = Pattern.init(edit_payee.payee, .prefix, edit_payee.unknown) };
+                },
+                's' => {
+                    self.state = .{ .pattern = Pattern.init(edit_payee.payee, .prefix, edit_payee.unknown) };
                 },
                 else => {},
             };
-            switch (self.payee) {
-                .unknown => |unknown| {
-                    if (input != null and input.? == .char) switch (input.?.char) {
-                        'e' => {
-                            return Result{ .submit = .{ .payee = edit_payee, .match = .{ .match = .exact, .pattern = unknown } } };
-                        },
-                        'p' => {
-                            self.state = .{ .pattern = Pattern.init(edit_payee, .prefix, unknown) };
-                        },
-                        's' => {
-                            self.state = .{ .pattern = Pattern.init(edit_payee, .prefix, unknown) };
-                        },
-                        else => {},
-                    };
-                    try writer.writeAll("(⏎)complete, or create an (e)xact, (p)refix, or (s)uffix pattern");
-                },
-                else => {
-                    return Result{ .submit = .{ .payee = edit_payee } };
-                },
-            }
+            try writer.writeAll("(⏎)complete, or create an (e)xact, (p)refix, or (s)uffix pattern");
         },
         .pattern => |*pattern| {
             if (try pattern.render(window, input)) |result| switch (result) {
                 .cancel => {
-                    self.state = .{ .ask_pattern = pattern.payee };
+                    self.state = .{
+                        .ask_pattern = .{
+                            .payee = pattern.payee,
+                            .unknown = pattern.pattern_editor.str,
+                        },
+                    };
                 },
                 .submit => |submit| {
                     return Result{

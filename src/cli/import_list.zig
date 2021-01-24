@@ -51,7 +51,7 @@ pub fn render(
         {
             const highlight = is_current and field == .payee;
 
-            if (transaction.payee == .unknown) {
+            if (transaction.payee == .unknown or transaction.payee == .none) {
                 window.attrSet(if (highlight) attr(.attention_highlight) else attr(.attention)) catch {};
                 writer.print("({})", .{transaction.payee}) catch {};
             } else {

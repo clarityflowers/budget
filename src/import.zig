@@ -110,10 +110,10 @@ pub const Category = union(enum) {
 
 pub const ImportedTransaction = struct {
     date: Date,
-    amount: i32,
-    payee: ImportPayee,
-    memo: []const u8,
-    id: u32,
+    amount: i32 = 0,
+    payee: ImportPayee = .none,
+    memo: []const u8 = "",
+    id: ?u32 = null,
     category: ?Category = null,
 
     pub fn earlierThan(lh: @This(), rh: @This()) bool {
@@ -122,6 +122,16 @@ pub const ImportedTransaction = struct {
 
     pub fn sortFn(context: void, lh: @This(), rh: @This()) bool {
         return lh.earlierThan(rh);
+    }
+
+    pub fn free(self: @This(), allocator: *std.mem.Allocator) void {
+        switch (self.payee) {
+            .unknown => |str| allocator.free(str),
+            .payee, .transfer, .none => {},
+        }
+        if (self.memo.len > 0) {
+            allocator.free(self.memo);
+        }
     }
 };
 
@@ -266,16 +276,18 @@ pub fn convert(db: *const sqlite.Database, account_name: []const u8, import_read
 
     var count: usize = 0;
     for (transactions) |transaction, i| {
-        if (existing_transactions.contains(.{
-            .date = transaction.date,
-            .id = transaction.id,
-        })) {
-            continue;
-        } else {
-            if (i != count) {
-                transactions[count] = transactions[i];
+        if (transaction.id) |id| {
+            if (existing_transactions.contains(.{
+                .date = transaction.date,
+                .id = id,
+            })) {
+                continue;
+            } else {
+                if (i != count) {
+                    transactions[count] = transactions[i];
+                }
+                count += 1;
             }
-            count += 1;
         }
     }
     if (count != transactions.len) {
@@ -310,6 +322,7 @@ pub const ImportPayee = union(enum) {
     payee: *Payee,
     transfer: *const Account,
     unknown: []const u8,
+    none,
 
     pub fn format(
         self: @This(),
@@ -322,6 +335,7 @@ pub const ImportPayee = union(enum) {
             .transfer => |payee| (try writer.write("Transfer to ")) +
                 try writer.write(payee.name),
             .unknown => |str| try writer.write(str),
+            .none => try writer.write("none"),
         };
 
         if (options.width) |width| {
@@ -349,27 +363,25 @@ pub fn autofillPayees(
     const statement = db.prepare(@embedFile("payee_autofill.sql")) catch return error.AutofillPayeesFailed;
 
     defer statement.finalize() catch {};
-    for (transactions) |*transaction| {
-        switch (transaction.payee) {
-            .unknown => |payee_name| {
-                statement.reset() catch return error.AutofillPayeesFailed;
-                statement.bind(.{ payee_name, account_name }) catch return error.AutofillPayeesFailed;
+    for (transactions) |*transaction| switch (transaction.payee) {
+        .unknown => |payee_name| {
+            statement.reset() catch return error.AutofillPayeesFailed;
+            statement.bind(.{ payee_name, account_name }) catch return error.AutofillPayeesFailed;
 
-                if (statement.step() catch return error.AutofillPayeesFailed) {
-                    if (statement.columnType(0) == .Null) {
-                        transaction.payee = .{
-                            .transfer = &(accounts.getEntry(statement.columnInt64(1)) orelse continue).value,
-                        };
-                    } else {
-                        transaction.payee = .{
-                            .payee = &(payees.getEntry(statement.columnInt64(0)) orelse continue).value,
-                        };
-                    }
+            if (statement.step() catch return error.AutofillPayeesFailed) {
+                if (statement.columnType(0) == .Null) {
+                    transaction.payee = .{
+                        .transfer = &(accounts.getEntry(statement.columnInt64(1)) orelse continue).value,
+                    };
+                } else {
+                    transaction.payee = .{
+                        .payee = &(payees.getEntry(statement.columnInt64(0)) orelse continue).value,
+                    };
                 }
-            },
-            else => continue,
-        }
-    }
+            }
+        },
+        else => continue,
+    };
 }
 
 pub const CategoryGroup = struct {

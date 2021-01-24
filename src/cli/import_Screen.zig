@@ -17,6 +17,7 @@ const unicode = @import("unicode.zig");
 db: Database,
 allocator: *std.mem.Allocator,
 data: *import.PreparedImport,
+transactions: std.ArrayList(import.ImportedTransaction),
 // payees: std.AutoHashMap(i64, import.Payee),
 state: ScreenState = .{},
 attempting_interrupt: bool = false,
@@ -24,12 +25,14 @@ initialized: bool = false,
 err: Err,
 
 // COMMANDS
-// tab/shift+tab   go to next/previous field
-// down/up         go to next/previous transaction
-// enter           go to next empty field
-// space           edit currently selected field
-// ^c              quit
-// `               show console output
+// tab/shift+tab    go to next/previous field
+// down/up          go to next/previous transaction
+// enter            go to next empty field
+// space            edit currently selected field
+// ^c               quit
+// `                show console output
+// n                new transaction
+// D                delete transaction
 
 seen_instructions: bool = false,
 
@@ -63,6 +66,7 @@ pub fn init(
         .state = .{
             .field = .{ .payee = null },
         },
+        .transactions = std.ArrayList(import.ImportedTransaction).fromOwnedSlice(allocator, data.transactions),
         .err = Err.init(allocator),
     };
     return result;
@@ -74,18 +78,18 @@ pub fn deinit(self: *@This()) void {
 }
 
 pub fn isMissing(self: @This(), state: ScreenState) bool {
-    const transaction = self.data.transactions[state.current];
+    const transaction = self.transactions.items[state.current];
     return switch (state.field) {
         .amount => transaction.amount == 0,
         .date => false,
-        .payee => transaction.payee == .unknown,
+        .payee => transaction.payee == .unknown or transaction.payee == .none,
         .category => transaction.payee == .payee and transaction.category == null,
         .memo => false,
     };
 }
 
 pub fn getNextMissing(self: @This()) ?ScreenState {
-    const current = self.data.transactions[self.state.current];
+    const current = self.transactions.items[self.state.current];
     var result = self.next(self.state);
     while (!self.isMissing(result)) {
         result = self.next(result);
@@ -97,7 +101,7 @@ pub fn getNextMissing(self: @This()) ?ScreenState {
 pub fn moveUp(self: @This(), state: ScreenState) ScreenState {
     var result = state;
     if (result.current == 0) {
-        result.current = self.data.transactions.len - 1;
+        result.current = self.transactions.items.len - 1;
     } else {
         result.current -= 1;
     }
@@ -106,7 +110,7 @@ pub fn moveUp(self: @This(), state: ScreenState) ScreenState {
         .amount => result.field = .{ .amount = null },
         .payee => result.field = .{ .payee = null },
         .category => {
-            if (self.data.transactions[result.current].payee == .payee) {
+            if (self.transactions.items[result.current].payee == .payee) {
                 result.field = .{ .category = null };
             } else {
                 result.field = .{ .payee = null };
@@ -119,13 +123,13 @@ pub fn moveUp(self: @This(), state: ScreenState) ScreenState {
 
 pub fn moveDown(self: @This(), state: ScreenState) ScreenState {
     var result = state;
-    result.current = (result.current + 1) % self.data.transactions.len;
+    result.current = (result.current + 1) % self.transactions.items.len;
     switch (result.field) {
         .date => result.field = .{ .date = null },
         .amount => result.field = .{ .amount = null },
         .payee => result.field = .{ .payee = null },
         .category => {
-            if (self.data.transactions[result.current].payee == .payee) {
+            if (self.transactions.items[result.current].payee == .payee) {
                 result.field = .{ .category = null };
             } else {
                 result.field = .{ .payee = null };
@@ -146,7 +150,7 @@ pub fn next(self: @This(), state: ScreenState) ScreenState {
             result.field = .{ .payee = null };
         },
         .payee => {
-            if (self.data.transactions[result.current].payee == .payee) {
+            if (self.transactions.items[result.current].payee == .payee) {
                 result.field = .{ .category = null };
             } else {
                 result.field = .{ .memo = null };
@@ -179,7 +183,7 @@ pub fn prev(self: @This(), state: ScreenState) ScreenState {
             result.field = .{ .payee = null };
         },
         .memo => {
-            if (self.data.transactions[result.current].payee == .payee) {
+            if (self.transactions.items[result.current].payee == .payee) {
                 result.field = .{ .category = null };
             } else {
                 result.field = .{ .payee = null };
@@ -237,13 +241,13 @@ fn render_internal(
     input_key: ?ncurses.Key,
 ) Error!bool {
     if (self.initialized == false) {
-        if (self.data.transactions[0].payee != .unknown) {
+        if (!self.isMissing(self.state)) {
             self.state = self.getNextMissing() orelse self.state;
         }
         self.initialized = true;
     }
     var input = input_key;
-    const transactions = self.data.transactions;
+    const transactions = self.transactions.items;
 
     const divider_line = box.bounds.height - 3;
 
@@ -254,7 +258,7 @@ fn render_internal(
         }),
         self.state.current,
         self.state.field,
-        self.data.transactions,
+        self.transactions.items,
     );
 
     box.move(.{ .line = divider_line });
@@ -292,7 +296,7 @@ fn render_internal(
                 try writer.writeAll("( )edit (tab/s-tab)next/prev value (↓/↑)next/prev item (ret)next unfilled");
             }
         }
-        const transaction = &self.data.transactions[self.state.current];
+        const transaction = &self.transactions.items[self.state.current];
 
         switch (self.state.field) {
             .date => |*maybe_editor| {
@@ -342,16 +346,17 @@ fn render_internal(
                         },
                         .submit => |submission| {
                             defer submission.payee.deinit(self.allocator);
-                            const current_payee = self.data.transactions[self.state.current].payee;
+                            const current_payee = self.transactions.items[self.state.current].payee;
                             const id = try self.setPayee(submission.payee);
                             switch (current_payee) {
                                 .unknown => |unknown| {
+                                    defer self.allocator.free(unknown);
                                     if (submission.match) |match| {
                                         _ = try self.createMatch(id, match.match, match.pattern);
                                         try import.autofillPayees(
                                             self.db.handle,
                                             "",
-                                            self.data.transactions,
+                                            self.transactions.items,
                                             &self.data.payees,
                                             &self.data.accounts,
                                         );
@@ -362,7 +367,7 @@ fn render_internal(
                             // After filling out a payee, autofill that transaction's categories
                             try import.autofillCategories(
                                 self.db.handle,
-                                self.data.transactions[self.state.current .. self.state.current + 1],
+                                self.transactions.items[self.state.current .. self.state.current + 1],
                                 &self.data.categories,
                             );
                             input = after_submit;
@@ -440,7 +445,7 @@ fn render_internal(
 
                                 try import.autofillCategories(
                                     self.db.handle,
-                                    self.data.transactions,
+                                    self.transactions.items,
                                     &self.data.categories,
                                 );
                             }
@@ -472,6 +477,7 @@ fn render_internal(
                             input = null;
                         },
                         .submit => |new_memo| {
+                            self.allocator.free(transaction.memo);
                             transaction.memo = new_memo;
                             input = after_submit;
                         },
@@ -533,6 +539,22 @@ fn render_internal(
                 '\t' => {
                     new_state = self.next(self.state);
                 },
+                'n' => {
+                    try self.transactions.insert(self.state.current + 1, .{
+                        .date = self.transactions.items[self.state.current].date,
+                    });
+                    new_state = .{
+                        .current = self.state.current + 1,
+                        .field = .{ .date = null },
+                    };
+                },
+                'D' => {
+                    if (self.transactions.items.len > 0) {
+                        self.transactions.items[self.state.current].free(self.allocator);
+                        _ = self.transactions.orderedRemove(self.state.current);
+                        new_state = self.moveUp(self.state);
+                    }
+                },
                 else => {},
             },
             else => {},
@@ -560,11 +582,11 @@ fn render_internal(
 }
 
 fn payeeEditor(self: *@This(), current: usize) PayeeEditor {
-    return PayeeEditor.init(self.db, self.data.transactions[current], self.allocator);
+    return PayeeEditor.init(self.db, self.transactions.items[current], self.allocator);
 }
 
 fn setPayee(self: *@This(), edit_payee: PayeeEditor.EditPayee) !Database.PayeeId {
-    const payee = &self.data.transactions[self.state.current].payee;
+    const payee = &self.transactions.items[self.state.current].payee;
     switch (edit_payee) {
         .existing => |id| {
             payee.* = switch (id) {
