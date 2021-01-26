@@ -5,15 +5,16 @@ SELECT
   CASE
     WHEN name LIKE ?1 THEN 0
     WHEN name LIKE (?1 || '%') THEN 1
-    WHEN name LIKE ('Transfer to ' || ?1 || '%') THEN 2
+    WHEN name LIKE ('Transfer: ' || ?1 || '%') THEN 2
     ELSE NULL
   END AS sort_rank
 FROM (
   SELECT 
-    'Transfer to ' || accounts.name AS name, 
+    'Transfer: ' || accounts.name AS name, 
     accounts.id AS transfer_id, 
     NULL AS payee_id 
   FROM accounts 
+  WHERE accounts.id <> ?2
   UNION 
   SELECT 
     payees.name AS name, 

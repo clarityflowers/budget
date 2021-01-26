@@ -12,7 +12,7 @@ FROM payee_matches
 LEFT JOIN accounts on transfer_id = accounts.id
 WHERE 
   sort_rank IS NOT NULL AND
-  (accounts.id IS NULL OR accounts.name NOT LIKE ?2) AND
+  (accounts.id IS NULL OR accounts.id <> ?2) AND
   ?1 LIKE CASE COALESCE(pattern, '')
     WHEN '' THEN match
     WHEN 'starts_with' THEN match || '%'
@@ -39,7 +39,7 @@ SELECT
 FROM accounts
 WHERE 
   'Transfer to ' || name = ?1 AND 
-  name NOT LIKE ?2
+  id <> ?2
 
 ORDER BY sort_rank
 LIMIT 1;

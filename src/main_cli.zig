@@ -123,7 +123,8 @@ const Spec = union(enum) {
             const db_file = try getBudgetFilePath(result.options, context.allocator);
             const db = try sqlite.Database.openWithOptions(db_file, .{ .mode = .readonly });
             const column_input = try std.io.getStdIn().reader().readUntilDelimiterAlloc(context.allocator, '\n', 1024 * 1024);
-            const rules = try account_actions.getImportRules(&db, result.options._.account, column_input, context.allocator);
+            const account_id = try account_actions.getIdForName(&db, result.options._.account);
+            const rules = try account_actions.getImportRules(&db, account_id, column_input, context.allocator);
             std.debug.print("{}\n", .{rules});
         }
     },
@@ -168,14 +169,14 @@ const Spec = union(enum) {
         pub fn exec(result: ParseArgsResult(@This()), context: Context) !void {
             const db_file = try getBudgetFilePath(result.options, context.allocator);
             const db = try sqlite.Database.openWithOptions(db_file, .{ .mode = .readwrite });
-            const account_id = (try account_actions.getIdForName(&db, result.options._.name)) orelse return error.AccountNotFound;
+            const account_id = try account_actions.getIdForName(&db, result.options._.name);
             const reader = if (result.options.file) |file|
                 (try std.fs.cwd().openFile(file, .{})).reader()
             else
                 std.io.getStdIn().reader();
             var prepared_import = try import_actions.prepareImport(
                 &db,
-                result.options._.name,
+                account_id,
                 reader,
                 context.allocator,
             );
@@ -269,5 +270,6 @@ pub fn getBudgetFilePath(options: anytype, allocator: *std.mem.Allocator) ![:0]c
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) noreturn {
     @import("cli/ncurses.zig").end();
+    logger.closeLogfile();
     std.builtin.default_panic(msg, error_return_trace);
 }

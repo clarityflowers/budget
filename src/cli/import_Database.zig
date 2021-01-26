@@ -17,14 +17,14 @@ pub fn init(db: *const sqlite.Database) !@This() {
         .payee_autocomplete = try db.prepare(@embedFile("payee_completions.sql")),
         .payee_create = try db.prepare("INSERT INTO payees(name) values(?)"),
         .payee_match_create = try db.prepare(
-            \\INSERT INTO payee_matches(payee_id, transfer_id, match, pattern)
+            \\INSERT OR REPLACE INTO payee_matches(payee_id, transfer_id, match, pattern)
             \\VALUES(?, ?, ?, ?)
         ),
         .category_autocomplete = try db.prepare(@embedFile("category_completions.sql")),
         .category_group_create = try db.prepare("INSERT INTO category_groups(name) VALUES (?)"),
         .category_create = try db.prepare("INSERT INTO categories(category_group_id, name) VALUES (?, ?)"),
         .category_match_create = try db.prepare(
-            \\INSERT INTO category_matches(payee_id, category_id, amount, note, note_pattern)
+            \\INSERT OR REPLACE INTO category_matches(payee_id, category_id, amount, note, note_pattern)
             \\VALUES (?, ?, ?, ?, ?)
         ),
         .category_autofill = try import.AutofillCategoryQuery.init(db),

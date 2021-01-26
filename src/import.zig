@@ -203,7 +203,7 @@ const ImportedPayee = struct {
     name: []const u8,
 };
 
-pub fn convert(db: *const sqlite.Database, account_name: []const u8, import_reader: anytype, allocator: *std.mem.Allocator) ![]ImportedTransaction {
+pub fn convert(db: *const sqlite.Database, account_id: i64, import_reader: anytype, allocator: *std.mem.Allocator) ![]ImportedTransaction {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     var temporary_arena = std.heap.ArenaAllocator.init(allocator);
@@ -211,7 +211,7 @@ pub fn convert(db: *const sqlite.Database, account_name: []const u8, import_read
 
     var line_reader = LineReader(@TypeOf(import_reader), 1024 * 1024).init(import_reader, &arena.allocator);
     const header = (try line_reader.nextLine()) orelse return error.NoHeader;
-    const rules = try account.getImportRules(db, account_name, header, &temporary_arena.allocator);
+    const rules = try account.getImportRules(db, account_id, header, &temporary_arena.allocator);
     var transactions_list = ArrayList(ImportedTransaction).init(&arena.allocator);
     var transactions = blk: {
         var values_list = ArrayList([]const u8).init(&temporary_arena.allocator);
@@ -246,14 +246,14 @@ pub fn convert(db: *const sqlite.Database, account_name: []const u8, import_read
             \\SELECT date, bank_id FROM transactions
             \\JOIN accounts ON accounts.id = transactions.account_id
             \\WHERE 
-            \\  accounts.name LIKE ? AND
+            \\  accounts.id = ? AND
             \\  transactions.date >= ?
             \\ORDER BY transactions.date
         ));
         defer statement.finalize() catch {};
         var date_buffer: [10]u8 = undefined;
         try std.io.fixedBufferStream(date_buffer[0..]).writer().print("{}", .{transactions[0].date});
-        try statement.bind(.{ account_name, date_buffer[0..] });
+        try statement.bind(.{ account_id, date_buffer[0..] });
         while (try statement.step()) {
             const existing_transaction: ExistingTransaction = .{
                 .date = try Date.parse(statement.columnText(0)),
@@ -322,7 +322,7 @@ pub const ImportPayee = union(enum) {
     ) !void {
         const written = switch (self) {
             .payee => |payee| try writer.write(payee.name),
-            .transfer => |payee| (try writer.write("Transfer to ")) +
+            .transfer => |payee| (try writer.write("Transfer:  ")) +
                 try writer.write(payee.name),
             .unknown => |str| try writer.write(str),
             .none => try writer.write("none"),
@@ -341,29 +341,31 @@ pub const Payee = struct {
 };
 
 pub const Payees = std.AutoHashMap(i64, *Payee);
-pub const Accounts = std.AutoHashMap(i64, Account);
 
 pub fn autofillPayees(
     db: *const sqlite.Database,
-    account_name: []const u8,
+    account_id: i64,
     transactions: []ImportedTransaction,
     payees: *const Payees,
-    accounts: *const Accounts,
+    accounts: *const account_actions.Accounts,
 ) !void {
     const statement = db.prepare(@embedFile("payee_autofill.sql")) catch return error.AutofillPayeesFailed;
 
     defer statement.finalize() catch {};
     for (transactions) |*transaction| switch (transaction.payee) {
         .unknown => |payee_name| {
+            log.debug("Autofill {}?", .{payee_name});
             statement.reset() catch return error.AutofillPayeesFailed;
-            statement.bind(.{ payee_name, account_name }) catch return error.AutofillPayeesFailed;
+            statement.bind(.{ payee_name, account_id }) catch return error.AutofillPayeesFailed;
 
             if (statement.step() catch return error.AutofillPayeesFailed) {
                 if (statement.columnType(0) == .Null) {
+                    log.debug("--> transfer id {}", .{statement.columnInt64(1)});
                     transaction.payee = .{
-                        .transfer = &(accounts.getEntry(statement.columnInt64(1)) orelse continue).value,
+                        .transfer = (accounts.getEntry(statement.columnInt64(1)) orelse continue).value,
                     };
                 } else {
+                    log.debug("--> payee id {}", .{statement.columnInt64(0)});
                     transaction.payee = .{
                         .payee = (payees.getEntry(statement.columnInt64(0)) orelse continue).value,
                     };
@@ -515,7 +517,7 @@ pub fn autofillCategories(
 }
 
 pub const PreparedImport = struct {
-    accounts: Accounts,
+    accounts: account_actions.Accounts,
     payees: Payees,
     category_groups: CategoryGroups,
     categories: Categories,
@@ -523,7 +525,7 @@ pub const PreparedImport = struct {
 };
 pub fn prepareImport(
     db: *const sqlite.Database,
-    account_name: []const u8,
+    account_id: i64,
     reader: anytype,
     allocator: *std.mem.Allocator,
 ) !PreparedImport {
@@ -531,7 +533,7 @@ pub fn prepareImport(
     errdefer arena.deinit();
     const imported_transactions = try convert(
         db,
-        account_name,
+        account_id,
         reader,
         &arena.allocator,
     );
@@ -541,7 +543,7 @@ pub fn prepareImport(
     accounts.allocator = allocator;
     var payees = try getPayees(db, &arena.allocator);
     payees.allocator = allocator;
-    try autofillPayees(db, account_name, imported_transactions, &payees, &accounts);
+    try autofillPayees(db, account_id, imported_transactions, &payees, &accounts);
 
     var category_groups = try getCategoryGroups(db, &arena.allocator);
 

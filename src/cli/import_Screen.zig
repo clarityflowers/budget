@@ -458,6 +458,7 @@ fn render_internal(
                             },
                             .submit => |submission| {
                                 defer submission.payee.deinit(self.allocator);
+                                const original_payee = transaction.payee;
                                 const id = blk: {
                                     switch (submission.payee) {
                                         .existing => |id| {
@@ -467,7 +468,7 @@ fn render_internal(
                                                         unreachable).value,
                                                 },
                                                 .transfer => |transfer_id| .{
-                                                    .transfer = &(self.data.accounts.getEntry(transfer_id) orelse
+                                                    .transfer = (self.data.accounts.getEntry(transfer_id) orelse
                                                         unreachable).value,
                                                 },
                                             };
@@ -485,7 +486,7 @@ fn render_internal(
                                         },
                                     }
                                 };
-                                switch (transaction.payee) {
+                                switch (original_payee) {
                                     .unknown => |unknown| {
                                         defer self.allocator.free(unknown);
                                         std.debug.assert(self.transactions.items[self.state.current].payee != .unknown);
@@ -493,7 +494,7 @@ fn render_internal(
                                             _ = try self.createMatch(id, match.match, match.pattern);
                                             try import.autofillPayees(
                                                 self.db.handle,
-                                                "",
+                                                self.account_id,
                                                 self.transactions.items,
                                                 &self.data.payees,
                                                 &self.data.accounts,
@@ -512,7 +513,7 @@ fn render_internal(
                             },
                         } else input = null;
                     } else if (select) {
-                        var editor = PayeeEditor.init(transaction.payee, self.allocator);
+                        var editor = PayeeEditor.init(transaction.payee, self.allocator, self.account_id);
                         maybe_editor.* = editor;
                     }
                 },

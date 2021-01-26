@@ -116,7 +116,7 @@ fn parseStringRule(
 /// Allocated memory is owned by the caller
 pub fn getImportRules(
     db: *const sqlite.Database,
-    account_name: []const u8,
+    account_id: i64,
     header_row: []const u8,
     allocator: *std.mem.Allocator,
 ) !ImportDsvRules {
@@ -132,10 +132,10 @@ pub fn getImportRules(
         \\  id_columns
         \\FROM import_rules
         \\JOIN accounts on accounts.id = import_rules.account_id
-        \\WHERE accounts.name LIKE ?;
+        \\WHERE accounts.id = ?;
     ));
     defer statement.finalize() catch {};
-    try statement.bind(.{account_name});
+    try statement.bind(.{account_id});
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
@@ -169,10 +169,6 @@ pub fn getImportRules(
             .id = id,
         };
     };
-    if (try statement.step()) {
-        log.alert("Bad data: more than one import rule for {}", .{account_name});
-        return error.BadData;
-    }
     return result;
 }
 
@@ -196,7 +192,7 @@ pub const Account = struct {
     id: i64,
     name: []const u8,
 };
-pub const Accounts = std.AutoHashMap(i64, Account);
+pub const Accounts = std.AutoHashMap(i64, *Account);
 pub fn getAccounts(db: *const sqlite.Database, allocator: *std.mem.Allocator) !Accounts {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
@@ -206,22 +202,24 @@ pub fn getAccounts(db: *const sqlite.Database, allocator: *std.mem.Allocator) !A
     defer statement.finalize() catch {};
     var accounts = Accounts.init(&arena.allocator);
     while (try statement.step()) {
-        const id = statement.columnInt64(0);
-        try accounts.put(id, .{
-            .id = id,
-            .name = try arena.allocator.dupe(u8, statement.columnText(1)),
-        });
+        const account = try arena.allocator.create(Account);
+        account.id = statement.columnInt64(0);
+        account.name = try arena.allocator.dupe(u8, statement.columnText(1));
+        try accounts.put(account.id, account);
     }
     accounts.allocator = allocator;
     return accounts;
 }
 
-pub fn getIdForName(db: *const sqlite.Database, name: []const u8) !?i64 {
+pub fn getIdForName(db: *const sqlite.Database, name: []const u8) !i64 {
     const statement = try db.prepare(
         \\ SELECT id FROM accounts WHERE name = ?
     );
     try statement.bind(.{name});
     defer statement.finalize() catch {};
-    if (!try statement.step()) return null;
+    if (!try statement.step()) {
+        log.alert("No account with the name \"{}\"", .{name});
+        return error.NoAccountWithThatName;
+    }
     return statement.columnInt64(0);
 }

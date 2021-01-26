@@ -20,6 +20,7 @@ state: union(enum) {
 payee: import.ImportPayee,
 allocator: *std.mem.Allocator,
 err: Err,
+account_id: i64,
 
 pub const EditPayee = union(enum) {
     existing: Database.PayeeId,
@@ -42,12 +43,14 @@ const PayeeAutocomplete = struct {
 pub fn init(
     payee: import.ImportPayee,
     allocator: *std.mem.Allocator,
+    account_id: i64,
 ) @This() {
     return @This(){
         .payee = payee,
         .allocator = allocator,
         .err = Err.init(allocator),
-        .state = .{ .edit = Edit.init(allocator) },
+        .state = .{ .edit = Edit.init(allocator, account_id) },
+        .account_id = account_id,
     };
 }
 
@@ -122,7 +125,7 @@ pub fn render(
             if (input != null and input.? == .char) switch (input.?.char) {
                 0x03 => {
                     defer edit_payee.payee.deinit(self.allocator);
-                    self.state = .{ .edit = Edit.init(self.allocator) };
+                    self.state = .{ .edit = Edit.init(self.allocator, self.account_id) };
                     return null;
                 },
                 '\r' => {
@@ -195,6 +198,7 @@ const Edit = struct {
     err: Err,
     text_field: TextField,
     payee_autocompletes: std.ArrayList(PayeeAutocomplete),
+    account_id: i64,
 
     pub const EditError = Database.Error ||
         std.mem.Allocator.Error || ncurses.Box.WriteError ||
@@ -209,12 +213,16 @@ const Edit = struct {
         cancel,
     };
 
-    pub fn init(allocator: *std.mem.Allocator) @This() {
+    pub fn init(
+        allocator: *std.mem.Allocator,
+        account_id: i64,
+    ) @This() {
         return .{
             .strings = std.ArrayList(u8).init(allocator),
             .err = Err.init(allocator),
             .text_field = TextField.init(allocator),
             .payee_autocompletes = std.ArrayList(PayeeAutocomplete).init(allocator),
+            .account_id = account_id,
         };
     }
 
@@ -290,7 +298,7 @@ const Edit = struct {
             writer.writeAll(completion.name) catch {};
             if (completion.sort_rank == 2) {
                 window.move(.{
-                    .column = "Transfer to ".len,
+                    .column = "Transfer:  ".len,
                 });
             } else {
                 window.move(.{});
@@ -329,8 +337,7 @@ const Edit = struct {
         var start: usize = 0;
         const stringsWriter = self.strings.writer();
         try self.text_field.printValue(stringsWriter);
-
-        statement.bindText(1, self.strings.items) catch return error.PayeeAutocompleteFailed;
+        statement.bind(.{ self.strings.items, self.account_id }) catch return error.PayeeAutocompleteFailed;
 
         while (statement.step() catch return error.PayeeAutocompleteFailed) {
             const name = try storeString(&self.strings, statement.columnText(0));
