@@ -179,7 +179,8 @@ const Spec = union(enum) {
                 reader,
                 context.allocator,
             );
-            try cli.runInteractiveImport(&db, &prepared_import, context.allocator, account_id);
+            const count = try cli.runInteractiveImport(&db, &prepared_import, context.allocator, account_id);
+            logger.info("Inserted {} new transactions", .{count});
         }
     },
     account: union(enum) {

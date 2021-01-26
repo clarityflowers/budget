@@ -3,6 +3,7 @@ const ncurses = @import("ncurses.zig");
 const attr = @import("attributes.zig").attr;
 const import = @import("../import.zig");
 const Currency = @import("../Currency.zig");
+const log = @import("../log.zig");
 
 pub const FieldTag = enum {
     date,
@@ -20,11 +21,12 @@ pub fn render(
     field: FieldTag,
     transactions: []const import.ImportedTransaction,
 ) Error!void {
+    log.debug("RENDER LIST {} {}", .{ current, field });
     window.attrSet(0) catch {};
 
     const number_to_display = (@intCast(usize, window.bounds.height - 1) / 4);
     const start = std.math.min(
-        transactions.len - number_to_display,
+        if (number_to_display > transactions.len) 0 else transactions.len - number_to_display,
         if (current < (number_to_display / 2)) 0 else (current - (number_to_display / 2)),
     );
     const writer = window.writer();
@@ -38,9 +40,11 @@ pub fn render(
     window.fillLine('─') catch {};
 
     for (transactions[start..std.math.min(transactions.len, start + number_to_display + 1)]) |transaction, i| {
+        log.debug("list transaction {}", .{i + start});
         const row = i * 4 + 1;
         const is_current = i + start == current;
         window.move(.{ .line = row });
+        log.debug("date: {}", .{transaction.date});
         {
             const highlight = is_current and field == .date;
             window.attrSet(if (highlight) attr(.highlight) else 0) catch {};
@@ -48,6 +52,8 @@ pub fn render(
             window.attrSet(0) catch {};
             try writer.writeAll(" │ ");
         }
+        log.debug("{}", .{@tagName(transaction.payee)});
+        log.debug("payee: {}", .{transaction.payee});
         {
             const highlight = is_current and field == .payee;
 
@@ -59,6 +65,7 @@ pub fn render(
                 writer.print("{}", .{transaction.payee}) catch {};
             }
         }
+        log.debug("amount: {}", .{transaction.amount});
         {
             window.move(.{ .line = row + 1 });
             const highlight = is_current and field == .amount;
@@ -76,6 +83,7 @@ pub fn render(
             try writer.print("{: >11}", .{amount});
         }
         try writer.writeAll(" │ ");
+        log.debug("category: {}", .{transaction.category});
         {
             const highlight = is_current and field == .category;
             if (transaction.category) |category| {
@@ -97,6 +105,7 @@ pub fn render(
         }
         window.move(.{ .line = row + 2 });
         try writer.writeAll(" " ** 12 ++ "│ ");
+        log.debug("memo: {}", .{transaction.category});
         {
             const highlight = is_current and field == .memo;
             if (highlight) {

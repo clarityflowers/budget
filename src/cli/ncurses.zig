@@ -532,7 +532,6 @@ pub const Box = struct {
 
     pub fn move(self: *@This(), position: Position) void {
         const new_position = position.plus(self.bounds.position());
-        // log.debug("New position: {}\n{}\n{}\n", .{ self.bounds, position, new_position });
         if (new_position.inside(self.bounds)) {
             self.window.move(new_position);
             self.out_of_bounds = false;

@@ -42,6 +42,7 @@ err: Err,
 // D                delete transaction
 // s                split transaction
 // b                view new account balance
+// S                save changes
 
 seen_instructions: bool = false,
 
@@ -56,8 +57,6 @@ const ScreenState = struct {
     field: Field,
     current: usize = 0,
 };
-
-pub const DB = struct {};
 
 pub fn init(
     db: *const sqlite.Database,
@@ -209,7 +208,7 @@ pub fn render(
     self: *@This(),
     box: *ncurses.Box,
     input_key: ?ncurses.Key,
-) !bool {
+) !?usize {
     return self.render_internal(box, input_key) catch |err| {
         switch (err) {
             error.CreatePayeeFailed,
@@ -222,6 +221,7 @@ pub fn render(
             error.AutofillPayeesFailed,
             error.AutofillCategoriesFailed,
             error.ShowBalanceFailed,
+            error.SaveFailed,
             => self.err.set("Err: {}. {}", .{ @errorName(err), self.db.getError() }) catch {},
             error.OutOfMemory,
             error.InvalidUtf8,
@@ -232,7 +232,7 @@ pub fn render(
         if (std.builtin.mode == .Debug) {
             log.err("Encountered error: {} {}", .{ err, @errorReturnTrace() });
         }
-        return false;
+        return null;
     };
 }
 
@@ -245,6 +245,7 @@ const Error = error{
     AutofillCategoriesFailed,
     UpdateMatchFailed,
     ShowBalanceFailed,
+    SaveFailed,
 } || std.mem.Allocator.Error ||
     PayeeEditor.Error;
 
@@ -252,7 +253,7 @@ fn render_internal(
     self: *@This(),
     box: *ncurses.Box,
     input_key: ?ncurses.Key,
-) Error!bool {
+) Error!?usize {
     if (self.initialized == false) {
         if (!self.isMissing(self.state)) {
             self.state = self.getNextMissing() orelse self.state;
@@ -291,7 +292,7 @@ fn render_internal(
     if (self.err.active()) {
         if (try self.err.render(&lower_box, input)) {
             input = null;
-        } else return false;
+        } else return null;
     }
 
     const select = char_input != null and char_input.? == ' ';
@@ -304,10 +305,10 @@ fn render_internal(
             lower_box.move(.{});
             lower_box.writer().print("Press ^C again to quit.", .{}) catch {};
             if (cancel) {
-                return true;
+                return error.Interrupted;
             } else if (input != null) {
                 self.action = .none;
-                return false;
+                return null;
             }
         },
         .show_balance => {
@@ -335,7 +336,7 @@ fn render_internal(
 
             if (input != null) {
                 self.action = .none;
-                return false;
+                return null;
             }
         },
         .split => |*split_editor| {
@@ -370,7 +371,7 @@ fn render_internal(
                     self.transactions.items[self.state.current].amount -= amount;
                 },
             };
-            return false;
+            return null;
         },
         .none => {
             const writer = lower_box.writer();
@@ -457,11 +458,37 @@ fn render_internal(
                             },
                             .submit => |submission| {
                                 defer submission.payee.deinit(self.allocator);
-                                const current_payee = self.transactions.items[self.state.current].payee;
-                                const id = try self.setPayee(submission.payee);
-                                switch (current_payee) {
+                                const id = blk: {
+                                    switch (submission.payee) {
+                                        .existing => |id| {
+                                            transaction.payee = switch (id) {
+                                                .payee => |payee_id| .{
+                                                    .payee = (self.data.payees.getEntry(payee_id) orelse
+                                                        unreachable).value,
+                                                },
+                                                .transfer => |transfer_id| .{
+                                                    .transfer = &(self.data.accounts.getEntry(transfer_id) orelse
+                                                        unreachable).value,
+                                                },
+                                            };
+                                            break :blk id;
+                                        },
+                                        .new => |name| {
+                                            const id = try self.db.createPayee(name);
+                                            var payee_to_insert = try self.allocator.create(import.Payee);
+                                            payee_to_insert.id = id;
+                                            payee_to_insert.name = try self.allocator.dupe(u8, name);
+                                            try self.data.payees.put(id, payee_to_insert);
+
+                                            transaction.payee = .{ .payee = (self.data.payees.getEntry(id) orelse unreachable).value };
+                                            break :blk Database.PayeeId{ .payee = id };
+                                        },
+                                    }
+                                };
+                                switch (transaction.payee) {
                                     .unknown => |unknown| {
                                         defer self.allocator.free(unknown);
+                                        std.debug.assert(self.transactions.items[self.state.current].payee != .unknown);
                                         if (submission.match) |match| {
                                             _ = try self.createMatch(id, match.match, match.pattern);
                                             try import.autofillPayees(
@@ -472,15 +499,15 @@ fn render_internal(
                                                 &self.data.accounts,
                                             );
                                         }
+                                        // After filling out a payee, autofill that transaction's categories
+                                        try import.autofillCategories(
+                                            self.db.handle,
+                                            self.transactions.items[self.state.current .. self.state.current + 1],
+                                            &self.data.categories,
+                                        );
                                     },
                                     else => {},
                                 }
-                                // After filling out a payee, autofill that transaction's categories
-                                try import.autofillCategories(
-                                    self.db.handle,
-                                    self.transactions.items[self.state.current .. self.state.current + 1],
-                                    &self.data.categories,
-                                );
                                 input = after_submit;
                             },
                         } else input = null;
@@ -506,7 +533,7 @@ fn render_internal(
                                             },
                                             .budget => |category_id| {
                                                 transaction.category = .{
-                                                    .budget = &(self.data.categories.getEntry(category_id) orelse unreachable).value,
+                                                    .budget = (self.data.categories.getEntry(category_id) orelse unreachable).value,
                                                 };
                                             },
                                         }
@@ -514,9 +541,8 @@ fn render_internal(
                                     },
                                     .new => |new| new_blk: {
                                         const group = switch (new.group) {
-                                            .existing => |id| &(self.data.category_groups.getEntry(id) orelse {
-                                                try self.err.set("Entry not found: {}", .{id});
-                                                return false;
+                                            .existing => |id| (self.data.category_groups.getEntry(id) orelse {
+                                                return null;
                                             }).value,
                                             .new => |name| blk: {
                                                 const name_utf8 = try unicode.encodeUtf8Alloc(name, self.allocator);
@@ -524,8 +550,12 @@ fn render_internal(
                                                 const id = try self.db.createCategoryGroup(name_utf8);
                                                 const res = try self.data.category_groups.getOrPut(id);
                                                 std.debug.assert(!res.found_existing);
-                                                res.entry.value = .{ .id = id, .name = name_utf8 };
-                                                break :blk &res.entry.value;
+                                                const new_group = try self.allocator.create(import.CategoryGroup);
+                                                errdefer self.allocator.destroy(new_categorty);
+                                                new_group.id = id;
+                                                new_group.name = name_utf8;
+                                                res.entry.value = new_group;
+                                                break :blk new_group;
                                             },
                                         };
                                         const name_utf8 = try unicode.encodeUtf8Alloc(new.name, self.allocator);
@@ -533,13 +563,14 @@ fn render_internal(
                                         const id = try self.db.createCategory(group.id, name_utf8);
                                         const res = try self.data.categories.getOrPut(id);
                                         std.debug.assert(!res.found_existing);
-                                        res.entry.value = .{
-                                            .id = id,
-                                            .group = group,
-                                            .name = name_utf8,
-                                        };
+                                        const new_category = try self.allocator.create(import.BudgetCategory);
+                                        errdefer self.allocator.destroy(new_category);
+                                        new_category.id = id;
+                                        new_category.group = group;
+                                        new_category.name = name_utf8;
+                                        res.entry.value = new_category;
                                         transaction.category = .{
-                                            .budget = &res.entry.value,
+                                            .budget = res.entry.value,
                                         };
                                         break :new_blk Database.CategoryId{ .budget = id };
                                     },
@@ -553,7 +584,6 @@ fn render_internal(
                                         category_id,
                                         transaction.payee.payee.id,
                                     }) catch return Error.CreateCategoryMatchFailed;
-
                                     try import.autofillCategories(
                                         self.db.handle,
                                         self.transactions.items,
@@ -562,7 +592,7 @@ fn render_internal(
                                 }
                                 input = after_submit;
                             },
-                        } else return false;
+                        } else return null;
                     } else if (select) {
                         const existing_match_id = if (try self.db.category_autofill.get(
                             transaction.payee.payee.id,
@@ -592,13 +622,13 @@ fn render_internal(
                                 transaction.memo = new_memo;
                                 input = after_submit;
                             },
-                        } else return false;
+                        } else return null;
                     } else if (select) {
                         maybe_editor.* = try MemoEditor.init(
                             self.allocator,
                             transaction.memo,
                         );
-                        return false;
+                        return null;
                     }
                 },
             }
@@ -622,7 +652,7 @@ fn render_internal(
             .char => |chr| switch (chr) {
                 0x03 => { // ^C
                     self.action = .attempting_interrupt;
-                    return false;
+                    return null;
                 },
                 '`' => {
                     ncurses.end();
@@ -660,7 +690,7 @@ fn render_internal(
                         self.transactions.items[self.state.current].free(self.allocator);
                         _ = self.transactions.orderedRemove(self.state.current);
                         new_state = self.moveUp(self.state);
-                        return false;
+                        return null;
                     }
                 },
                 's' => {
@@ -668,12 +698,64 @@ fn render_internal(
                         var amount_editor = AmountEditor.init(0);
                         amount_editor.negative = self.transactions.items[self.state.current].amount < 0;
                         self.action = .{ .split = amount_editor };
-                        return false;
+                        return null;
                     }
                 },
                 'b' => {
                     self.action = .show_balance;
-                    return false;
+                    return null;
+                },
+                'S' => {
+                    if (self.getNextMissing()) |s| {
+                        new_state = s;
+                        try self.err.set("Finish filling out all transactions before saving", .{});
+                        return null;
+                    }
+                    const statement = self.db.handle.prepare(
+                        \\ INSERT OR REPLACE INTO transactions(
+                        \\   account_id, 
+                        \\   date, 
+                        \\   amount, 
+                        \\   payee_id, 
+                        \\   category_id, 
+                        \\   transfer_id,
+                        \\   note,
+                        \\   bank_id
+                        \\ ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    ) catch return error.SaveFailed;
+                    defer statement.finalize() catch {};
+                    for (self.transactions.items) |transaction| {
+                        const payee_id = switch (transaction.payee) {
+                            .payee => |payee| @as(?i64, payee.id),
+                            .transfer => null,
+                            .unknown, .none => unreachable,
+                        };
+                        const category_id = switch (transaction.payee) {
+                            .payee => switch (transaction.category.?) {
+                                .income => @as(?i64, null),
+                                .budget => |budget| budget.id,
+                            },
+                            .transfer => null,
+                            .unknown, .none => unreachable,
+                        };
+                        const transfer_id = switch (transaction.payee) {
+                            .payee => @as(?i64, null),
+                            .transfer => |transfer| transfer.id,
+                            .unknown, .none => unreachable,
+                        };
+                        statement.bind(.{
+                            self.account_id,
+                            transaction.date.toString()[0..],
+                            transaction.amount,
+                            payee_id,
+                            category_id,
+                            transfer_id,
+                            transaction.memo,
+                            transaction.id,
+                        }) catch return error.SaveFailed;
+                        statement.finish() catch return error.SaveFailed;
+                    }
+                    return self.transactions.items.len;
                 },
                 else => {},
             },
@@ -690,44 +772,11 @@ fn render_internal(
         }
         self.state = ns;
     }
-    return false;
+    return null;
 }
 
-fn payeeEditor(self: *@This(), current: usize) PayeeEditor {
+fn payeeEditor(self: *@This(), current: usize) !PayeeEditor {
     return PayeeEditor.init(self.db, self.transactions.items[current], self.allocator);
-}
-
-fn setPayee(self: *@This(), edit_payee: PayeeEditor.EditPayee) !Database.PayeeId {
-    const payee = &self.transactions.items[self.state.current].payee;
-    switch (edit_payee) {
-        .existing => |id| {
-            payee.* = switch (id) {
-                .payee => |payee_id| .{
-                    .payee = &(self.data.payees.getEntry(payee_id) orelse unreachable).value,
-                },
-                .transfer => |transfer_id| .{
-                    .transfer = &(self.data.accounts.getEntry(transfer_id) orelse unreachable).value,
-                },
-            };
-            return id;
-        },
-        .new => |name| {
-            var name_buffer = std.ArrayList(u8).init(self.allocator);
-            var name_writer = name_buffer.writer();
-            // defer name_buffer.deinit();
-            for (name) |codepoint| {
-                var buffer: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(codepoint, &buffer) catch return error.InvalidUtf8;
-                try name_writer.writeAll(buffer[0..len]);
-            }
-            const id = try self.db.createPayee(name_buffer.items);
-            var payee_to_insert: import.Payee = .{ .id = id, .name = name_buffer.toOwnedSlice() };
-            try self.data.payees.put(id, payee_to_insert);
-
-            payee.* = .{ .payee = &(self.data.payees.getEntry(id) orelse unreachable).value };
-            return Database.PayeeId{ .payee = id };
-        },
-    }
 }
 
 /// Returns true if successesful

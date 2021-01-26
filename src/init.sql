@@ -66,12 +66,15 @@ CREATE TABLE transactions(
   transfer_id INTEGER,
   note        TEXT    NOT NULL,
   bank_id     INTEGER NOT NULL,
-  reconciled  INTEGER NOT NULL    CHECK (reconciled=0 OR reconciled=1),
+  reconciled  INTEGER NOT NULL    CHECK (reconciled=0 OR reconciled=1)  DEFAULT 0,
   FOREIGN KEY(account_id)     REFERENCES accounts(id),
   FOREIGN KEY(payee_id)       REFERENCES payees(id),
   FOREIGN KEY(category_id)    REFERENCES categories(id),
   FOREIGN KEY(transfer_id)    REFERENCES accounts(id),
   CONSTRAINT transaction_is_transfer_xor_has_payee CHECK(
       (transfer_id NOT NULL) <> (payee_id NOT NULL)
+  )
+  CONSTRAINT transaction_transfer_has_no_category CHECK(
+      (transfer_id NOT NULL) OR (category_id NOT NULL)
   )
 );

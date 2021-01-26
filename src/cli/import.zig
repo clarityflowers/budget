@@ -12,7 +12,7 @@ pub fn runInteractiveImport(
     data: *import.PreparedImport,
     allocator: *std.mem.Allocator,
     account_id: i64,
-) !void {
+) !usize {
     try log.openLogfile();
     defer log.closeLogfile();
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -50,7 +50,7 @@ pub fn runInteractiveImport(
     var screen = try Screen.init(db, data, allocator, account_id);
 
     defer screen.deinit();
-    if (try screen.render(&window.wholeBox(), null)) return;
+    if (try screen.render(&window.wholeBox(), null)) |result| return result;
 
     while (true) {
         const input = window.getChar() catch null;
@@ -67,10 +67,10 @@ pub fn runInteractiveImport(
         };
         window.erase() catch {};
 
-        if (try screen.render(&window.wholeBox(), input)) break;
+        if (try screen.render(&window.wholeBox(), input)) |result| return result;
         if (input != null) {
             window.erase() catch {};
-            if (try screen.render(&window.wholeBox(), null)) break;
+            if (try screen.render(&window.wholeBox(), null)) |result| return result;
         }
         try window.refresh();
     }

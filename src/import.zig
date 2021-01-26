@@ -37,16 +37,6 @@ comptime {
 
 // workflows
 // [ ] import account transactions
-//   [-] backup transactions
-//   [x] load existing data
-//   [x] reshape external csv/tsv files
-//   [x] load external data
-//   [x] match with existing data to throw out records
-//   [ ] reconcile each record
-//     [x] auto-match payees
-//     [ ] auto-match categories
-//     [ ] split transaction
-//   [ ] save new transactions as unreconciled
 //
 // [ ] reconcile
 //   [ ] backup budget
@@ -308,10 +298,10 @@ pub fn getPayees(db: *const sqlite.Database, allocator: *std.mem.Allocator) !Pay
     var map = Payees.init(&arena.allocator);
     while (try statement.step()) {
         const id = statement.columnInt64(0);
-        try map.put(id, .{
-            .name = try arena.allocator.dupe(u8, statement.columnText(1)),
-            .id = statement.columnInt64(0),
-        });
+        const payee = try allocator.create(Payee);
+        payee.name = try arena.allocator.dupe(u8, statement.columnText(1));
+        payee.id = statement.columnInt64(0);
+        try map.put(id, payee);
     }
     // TODO - idk if this is actually guaranteed safe?
     map.allocator = arena.child_allocator;
@@ -350,7 +340,7 @@ pub const Payee = struct {
     name: []const u8,
 };
 
-pub const Payees = std.AutoHashMap(i64, Payee);
+pub const Payees = std.AutoHashMap(i64, *Payee);
 pub const Accounts = std.AutoHashMap(i64, Account);
 
 pub fn autofillPayees(
@@ -375,7 +365,7 @@ pub fn autofillPayees(
                     };
                 } else {
                     transaction.payee = .{
-                        .payee = &(payees.getEntry(statement.columnInt64(0)) orelse continue).value,
+                        .payee = (payees.getEntry(statement.columnInt64(0)) orelse continue).value,
                     };
                 }
             }
@@ -398,10 +388,10 @@ pub fn getCategoryGroups(db: *const sqlite.Database, allocator: *std.mem.Allocat
     var groups = CategoryGroups.init(&arena.allocator);
     while (try statement.step()) {
         const id = statement.columnInt64(0);
-        try groups.put(id, .{
-            .id = id,
-            .name = try arena.allocator.dupe(u8, statement.columnText(1)),
-        });
+        const group = try arena.allocator.create(CategoryGroup);
+        group.id = id;
+        group.name = try arena.allocator.dupe(u8, statement.columnText(1));
+        try groups.put(id, group);
     }
     return groups;
 }
@@ -409,8 +399,8 @@ pub fn getCategoryGroups(db: *const sqlite.Database, allocator: *std.mem.Allocat
 pub const BudgetCategory = struct {
     id: i64, group: *const CategoryGroup, name: []const u8
 };
-pub const Categories = std.AutoHashMap(i64, BudgetCategory);
-pub const CategoryGroups = std.AutoHashMap(i64, CategoryGroup);
+pub const Categories = std.AutoHashMap(i64, *BudgetCategory);
+pub const CategoryGroups = std.AutoHashMap(i64, *CategoryGroup);
 
 pub fn getCategories(
     db: *const sqlite.Database,
@@ -434,11 +424,11 @@ pub fn getCategories(
             log.alert("Category {} ({}) has invalid group id {}", .{ statement.columnText(2), id, group_id });
             return error.BadData;
         };
-        try categories.put(id, .{
-            .id = id,
-            .group = &groupEntry.value,
-            .name = try arena.allocator.dupe(u8, statement.columnText(2)),
-        });
+        const category = try arena.allocator.create(BudgetCategory);
+        category.id = id;
+        category.group = groupEntry.value;
+        category.name = try arena.allocator.dupe(u8, statement.columnText(2));
+        try categories.put(id, category);
     }
     // TODO - idk if this is actually guaranteed safe?
     categories.allocator = arena.child_allocator;
@@ -488,7 +478,7 @@ pub const AutofillCategoryQuery = struct {
             } else {
                 return Result{
                     .category = .{
-                        .budget = &(categories.getEntry(self.statement.columnInt64(0)) orelse unreachable).value,
+                        .budget = (categories.getEntry(self.statement.columnInt64(0)) orelse unreachable).value,
                     },
                     .autofill_id = id,
                 };
