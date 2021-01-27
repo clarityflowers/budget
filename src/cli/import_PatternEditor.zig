@@ -1,7 +1,7 @@
 const Cursor = @import("Cursor.zig");
 const ncurses = @import("ncurses.zig");
 const Database = @import("import_Database.zig");
-const attr = @import("attributes.zig").attr;
+const attr = @import("curse.zig").attr;
 
 pattern: Pattern,
 str: []const u8,

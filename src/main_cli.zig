@@ -227,7 +227,7 @@ const Spec = union(enum) {
 //  - [x] how does autofill get configured?
 //  - [x] autofill payees
 //  - [x] autofill categories
-//  - [ ] oh jeez that means its time to build the interactive part
+//  - [x] oh jeez that means its time to build the interactive part
 //      - [x] display current transaction
 //      - [x] enter/shift+enter to move between transactions
 //      - [x] tab/shift+tab to move between columns
@@ -240,9 +240,20 @@ const Spec = union(enum) {
 //      - [x] set amount
 //      - [x] split transactions
 //      - [x] add new transaction
-//      - [ ] check totals
+//      - [x] check totals
 //      - [ ] sql mode
 //      - [ ] run arbitrary command
+//  - [ ] budgeting
+//      - [ ] list groups & categories for date
+//      - [ ] show totals
+//      - [ ] show year/3-month averages
+//      - [ ] scroll between categories
+//      - [ ] scroll between months
+//      - [ ] edit budgeted amount
+//      - [ ] add or subtract to budgeted amount
+//      - [ ] sql mode
+//      - [ ] run arbitrary command
+//      - [ ] view transaction history for category?
 //
 //  don't work on these things yet!!!
 //  - [ ] help text

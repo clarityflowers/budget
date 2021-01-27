@@ -3,7 +3,7 @@ const ncurses = @import("ncurses.zig");
 const Database = @import("import_Database.zig");
 const import = @import("../import.zig");
 const TextField = @import("TextField.zig");
-const attr = @import("attributes.zig").attr;
+const attr = @import("curse.zig").attr;
 const PatternEditor = @import("import_PatternEditor.zig");
 
 allocator: *std.mem.Allocator,

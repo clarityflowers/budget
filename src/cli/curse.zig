@@ -1,4 +1,21 @@
 const ncurses = @import("ncurses.zig");
+const c = @import("../c.zig");
+
+pub fn init(window: *ncurses.Window) !void {
+    try ncurses.startColor();
+    try ncurses.raw();
+    try ncurses.noecho();
+    _ = c.setlocale(c.LC_ALL, "en_US.UTF-8");
+    try ncurses.nonl();
+    try ncurses.useDefaultColors();
+    window.cursor = .invisible;
+    try initColors();
+    try window.keypad(true);
+    try window.intrflush(true);
+    try window.refresh();
+    try window.scrollOkay(false);
+}
+
 pub fn attr(attribute: enum {
     highlight,
     attention,

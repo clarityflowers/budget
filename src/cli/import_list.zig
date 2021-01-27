@@ -1,6 +1,6 @@
 const std = @import("std");
 const ncurses = @import("ncurses.zig");
-const attr = @import("attributes.zig").attr;
+const attr = @import("curse.zig").attr;
 const import = @import("../import.zig");
 const Currency = @import("../Currency.zig");
 const log = @import("../log.zig");

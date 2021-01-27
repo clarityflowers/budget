@@ -1,6 +1,6 @@
 const std = @import("std");
 const ncurses = @import("ncurses.zig");
-const attr = @import("attributes.zig").attr;
+const attr = @import("curse.zig").attr;
 
 str: std.ArrayList(u8),
 

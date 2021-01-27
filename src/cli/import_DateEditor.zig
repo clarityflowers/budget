@@ -2,7 +2,7 @@ const std = @import("std");
 const TextField = @import("TextField.zig");
 const Date = @import("../zig-date/src/date.zig").Date;
 const ncurses = @import("ncurses.zig");
-const attr = @import("attributes.zig").attr;
+const attr = @import("curse.zig").attr;
 
 date: Date,
 

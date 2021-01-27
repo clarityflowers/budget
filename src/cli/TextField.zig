@@ -1,6 +1,6 @@
 const std = @import("std");
 const ncurses = @import("ncurses.zig");
-const attr = @import("attributes.zig").attr;
+const attr = @import("curse.zig").attr;
 const Cursor = @import("Cursor.zig");
 
 str: std.ArrayList(u21),
