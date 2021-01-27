@@ -354,18 +354,15 @@ pub fn autofillPayees(
     defer statement.finalize() catch {};
     for (transactions) |*transaction| switch (transaction.payee) {
         .unknown => |payee_name| {
-            log.debug("Autofill {}?", .{payee_name});
             statement.reset() catch return error.AutofillPayeesFailed;
             statement.bind(.{ payee_name, account_id }) catch return error.AutofillPayeesFailed;
 
             if (statement.step() catch return error.AutofillPayeesFailed) {
                 if (statement.columnType(0) == .Null) {
-                    log.debug("--> transfer id {}", .{statement.columnInt64(1)});
                     transaction.payee = .{
                         .transfer = (accounts.getEntry(statement.columnInt64(1)) orelse continue).value,
                     };
                 } else {
-                    log.debug("--> payee id {}", .{statement.columnInt64(0)});
                     transaction.payee = .{
                         .payee = (payees.getEntry(statement.columnInt64(0)) orelse continue).value,
                     };

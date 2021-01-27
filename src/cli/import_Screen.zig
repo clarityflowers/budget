@@ -712,6 +712,8 @@ fn render_internal(
                         try self.err.set("Finish filling out all transactions before saving", .{});
                         return null;
                     }
+                    self.db.handle.exec("BEGIN TRANSACTION") catch return error.SaveFailed;
+                    errdefer self.db.handle.exec("ROLLBACK TRANSACTION") catch {};
                     const statement = self.db.handle.prepare(
                         \\ INSERT OR REPLACE INTO transactions(
                         \\   account_id, 
@@ -726,6 +728,7 @@ fn render_internal(
                     ) catch return error.SaveFailed;
                     defer statement.finalize() catch {};
                     for (self.transactions.items) |transaction| {
+                        statement.reset() catch return error.SaveFailed;
                         const payee_id = switch (transaction.payee) {
                             .payee => |payee| @as(?i64, payee.id),
                             .transfer => null,
@@ -746,7 +749,7 @@ fn render_internal(
                         };
                         statement.bind(.{
                             self.account_id,
-                            transaction.date.toString()[0..],
+                            &transaction.date.toString(),
                             transaction.amount,
                             payee_id,
                             category_id,
@@ -756,6 +759,7 @@ fn render_internal(
                         }) catch return error.SaveFailed;
                         statement.finish() catch return error.SaveFailed;
                     }
+                    self.db.handle.exec("COMMIT") catch return error.SaveFailed;
                     return self.transactions.items.len;
                 },
                 else => {},

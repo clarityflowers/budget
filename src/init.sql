@@ -75,6 +75,6 @@ CREATE TABLE transactions(
       (transfer_id NOT NULL) <> (payee_id NOT NULL)
   )
   CONSTRAINT transaction_transfer_has_no_category CHECK(
-      (transfer_id NOT NULL) OR (category_id NOT NULL)
+      (transfer_id NULL) OR (category_id NULL)
   )
 );
