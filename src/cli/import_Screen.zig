@@ -1,5 +1,5 @@
 const std = @import("std");
-const AmountEditor = @import("import_AmountEditor.zig");
+const CurrencyField = @import("CurrencyField.zig");
 const DateEditor = @import("import_DateEditor.zig");
 const PayeeEditor = @import("import_PayeeEditor.zig");
 const CategoryEditor = @import("import_CategoryEditor.zig");
@@ -23,7 +23,7 @@ transactions: std.ArrayList(import.ImportedTransaction),
 // payees: std.AutoHashMap(i64, import.Payee),
 state: ScreenState = .{},
 action: union(enum) {
-    split: AmountEditor,
+    split: CurrencyField,
     attempting_interrupt,
     show_balance,
     none,
@@ -48,7 +48,7 @@ seen_instructions: bool = false,
 
 const Field = union(list.FieldTag) {
     date: ?DateEditor,
-    amount: ?AmountEditor,
+    amount: ?CurrencyField,
     payee: ?PayeeEditor,
     category: ?CategoryEditor,
     memo: ?MemoEditor,
@@ -443,7 +443,7 @@ fn render_internal(
                             },
                         } else input = null;
                     } else if (select) {
-                        var editor = AmountEditor.init(transaction.amount);
+                        var editor = CurrencyField.init(transaction.amount);
                         maybe_editor.* = editor;
                     }
                 },
@@ -696,7 +696,7 @@ fn render_internal(
                 },
                 's' => {
                     if (self.transactions.items.len > 0) {
-                        var amount_editor = AmountEditor.init(0);
+                        var amount_editor = CurrencyField.init(0);
                         amount_editor.negative = self.transactions.items[self.state.current].amount < 0;
                         self.action = .{ .split = amount_editor };
                         return null;
