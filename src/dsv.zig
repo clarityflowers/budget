@@ -116,6 +116,14 @@ pub fn LineReader(comptime Stream: type, max_line_size: usize) type {
     };
 }
 
+pub fn lineReader(
+    stream: anytype,
+    max_line_size: usize,
+    allocator: *std.mem.Allocator,
+) LineReader(@TypeOf(stream), max_line_size) {
+    return LineReader(@typeOf(stream, max_line_size)).init(stream, allocator);
+}
+
 pub fn DelimitedRecordReader(comptime Stream: type, comptime delimiter: u8, max_line_size: usize) type {
     return struct {
         reader: LineReader(Stream, max_line_size),

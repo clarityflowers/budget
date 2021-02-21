@@ -3,8 +3,8 @@ const ncurses = @import("ncurses.zig");
 const Currency = @import("../Currency.zig");
 const Cursor = @import("Cursor.zig");
 
-value: u32,
-negative: bool,
+value: u32 = 0,
+negative: bool = false,
 
 const Result = union(enum) {
     submit: i32,
@@ -17,8 +17,6 @@ pub fn init(value: i32) @This() {
         .negative = value < 0,
     };
 }
-
-pub fn deinit(self: *@This()) void {}
 
 pub fn render(self: *@This(), box: *ncurses.Box, input: ?ncurses.Key) !?Result {
     const amount = @intCast(i32, self.value) * if (self.negative) @as(i32, -1) else 1;

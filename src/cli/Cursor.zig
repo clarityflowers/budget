@@ -58,6 +58,6 @@ fn assertIsText(comptime Type: type) void {
     if (info.Pointer.size != .Slice) @compileError(err);
     const child_info = @typeInfo(info.Pointer.child);
     if (child_info != .Int) @compileError(err);
-    if (child_info.Int.is_signed) @compileError(err);
+    if (child_info.Int.signedness != .unsigned) @compileError(err);
     if (child_info.Int.bits < 8) @compileError(err);
 }

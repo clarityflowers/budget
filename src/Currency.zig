@@ -17,5 +17,5 @@ pub fn format(
     }
     var amount = @intCast(u64, if (self.amount < 0) -self.amount else self.amount);
     fbs_writer.print("${d}.{d:0>2}", .{ amount / 100, amount % 100 }) catch {};
-    try std.fmt.formatText(fbs.getWritten(), "", options, writer);
+    try std.fmt.formatText(fbs.getWritten(), "s", options, writer);
 }

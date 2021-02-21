@@ -78,5 +78,6 @@ pub fn closeLogfile() void {
     if (logfile) |file| {
         file.close();
         std.fs.cwd().deleteFile(logfile_path) catch {};
+        logfile = null;
     }
 }

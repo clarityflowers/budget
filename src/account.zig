@@ -8,7 +8,7 @@ const DelimitedValueReader = @import("dsv.zig").DelimitedValueReader;
 const parseEnum = @import("parse.zig").parseEnum;
 
 pub const AccountType = enum {
-    checking, savings, credit
+    checking, savings, credit, cash, investment, other
 };
 pub const FileType = enum {
     csv, tsv

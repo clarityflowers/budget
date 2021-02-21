@@ -6,6 +6,7 @@ const sqlite = @import("sqlite-zig/src/sqlite.zig");
 const DelimitedValueReader = @import("dsv.zig").DelimitedValueReader;
 const import_actions = @import("import.zig");
 const cli = @import("cli.zig");
+const ynab = @import("ynab.zig");
 
 pub const log = logger.log;
 
@@ -182,6 +183,37 @@ const Spec = union(enum) {
             );
             const count = try cli.runInteractiveImport(&db, &prepared_import, context.allocator, account_id);
             logger.info("Inserted {} new transactions", .{count});
+        }
+    },
+    budget: struct {
+        budget: ?[]const u8,
+
+        pub fn exec(result: ParseArgsResult(@This()), context: Context) !void {
+            const db_file = try getBudgetFilePath(result.options, context.allocator);
+            const db = try sqlite.Database.openWithOptions(db_file, .{ .mode = .readwrite });
+            try cli.runInteractiveBudget(&db, context.allocator);
+            logger.info("All done", .{});
+        }
+    },
+    ynab_import: struct {
+        _: struct {
+            ynab_dir: []const u8,
+        },
+        budget: ?[]const u8,
+
+        pub fn exec(result: ParseArgsResult(@This()), context: Context) !void {
+            const db = blk: {
+                const db_file = try getBudgetFilePath(result.options, context.allocator);
+                defer context.allocator.free(db_file);
+                break :blk try sqlite.Database.openWithOptions(db_file, .{ .mode = .readwrite });
+            };
+            defer db.close() catch |err| {
+                logger.info("Err when closing db: {s} {s}", .{
+                    @errorName(err),
+                    db.errmsg(),
+                });
+            };
+            try ynab.import(&db, context.allocator, result.options._.ynab_dir);
         }
     },
     account: union(enum) {

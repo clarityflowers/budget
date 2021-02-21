@@ -345,11 +345,9 @@ fn render_internal(
             lower_box.move(.{});
             if (try split_editor.render(&lower_box, input)) |result| switch (result) {
                 .cancel => {
-                    split_editor.deinit();
                     self.action = .none;
                 },
                 .submit => |amount| {
-                    split_editor.deinit();
                     self.action = .none;
                     const transaction = &self.transactions.items[self.state.current];
                     const new_memo = try self.allocator.dupe(u8, transaction.memo);
@@ -433,7 +431,6 @@ fn render_internal(
                     if (maybe_editor.*) |*amount_editor| {
                         if (try amount_editor.render(&lower_box, input)) |result| switch (result) {
                             .cancel => {
-                                amount_editor.deinit();
                                 maybe_editor.* = null;
                                 input = null;
                             },
@@ -690,8 +687,9 @@ fn render_internal(
                     if (self.transactions.items.len > 0) {
                         self.transactions.items[self.state.current].free(self.allocator);
                         _ = self.transactions.orderedRemove(self.state.current);
-                        new_state = self.moveUp(self.state);
-                        return null;
+                        if (self.state.current == self.transactions.items.len) {
+                            new_state = self.moveUp(self.state);
+                        }
                     }
                 },
                 's' => {
@@ -770,7 +768,7 @@ fn render_internal(
     if (new_state) |ns| {
         switch (self.state.field) {
             .date => |*date| if (date.*) |*d| d.deinit(),
-            .amount => |*amount| if (amount.*) |*a| a.deinit(),
+            .amount => {},
             .payee => |*payee| if (payee.*) |*p| p.deinit(),
             .category => |*category| if (category.*) |*c| c.deinit(),
             .memo => |*memo| if (memo.*) |*m| m.deinit(),

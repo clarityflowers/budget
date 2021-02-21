@@ -20,7 +20,7 @@ const expectEqual = testing.expectEqual;
 const expectEqualStrings = testing.expectEqualStrings;
 const expectError = testing.expectError;
 
-pub const Error = error{
+pub const Error = std.process.ArgIterator.NextError || error{
     InvalidArguments,
     OutOfMemory,
     Unexpected,
@@ -180,7 +180,7 @@ fn parseInternal(comptime Spec: type, args: anytype, allocator: *Allocator) Erro
                     );
                 }
             }
-            log.alert("Unexpected command {}, expected one of: " ++ joinFieldNames(union_spec.fields, ", ") ++ ".", .{command});
+            log.alert("Unexpected command {s}, expected one of: " ++ joinFieldNames(union_spec.fields, ", ") ++ ".", .{command});
             return Error.InvalidArguments;
         },
         .Struct => |struct_spec| {
@@ -235,7 +235,7 @@ fn parseInternal(comptime Spec: type, args: anytype, allocator: *Allocator) Erro
                     }
                 } else {
                     if (!@hasField(Spec, "_")) {
-                        log.alert("Unexpected positional arguments passed.", .{});
+                        log.alert("Unexpected positional arguments passed: {}", .{arg});
                         return Error.InvalidArguments;
                     }
                     inline for (@typeInfo(@TypeOf(options._)).Struct.fields) |fld, index| {
